@@ -204,3 +204,64 @@ async def test_backfill_runs_on_startup(hass: HomeAssistant) -> None:
     assert call["end_time"].endswith("Z") or "+" in call["end_time"]
     # The backfilled event reaches the dispatcher with the backfilled flag preserved.
     assert any(evt.get("backfilled") for evt in received)
+
+
+@pytest.mark.asyncio
+async def test_backfill_imports_hourly_statistics(hass: HomeAssistant) -> None:
+    """Replayed events should be grouped into hour buckets and pushed into
+    HA's long-term statistics so the chart stays accurate across restarts."""
+    from homeassistant.helpers.dispatcher import async_dispatcher_connect  # noqa: F401
+
+    from custom_components.hikvision_access.api.discovery import ReaderInfo
+
+    entry = _build_entry()
+    entry.add_to_hass(hass)
+
+    async def fake_backfill(start_time, end_time, already_seen=()):
+        # Three events at 08:30, 08:45 (same hour), 09:15 (next hour).
+        for ts, serial in (
+            ("2026-05-26T08:30:00+00:00", 1),
+            ("2026-05-26T08:45:00+00:00", 2),
+            ("2026-05-26T09:15:00+00:00", 3),
+        ):
+            yield {
+                "device_id": None, "controller": "", "reader_no": 1, "reader_name": None,
+                "door_no": None, "card_no": f"c{serial}", "name": "x",
+                "minor_label": "card_swiped_valid", "serial_no": serial,
+                "timestamp": ts, "backfilled": True,
+                "major": "event", "minor": 1, "employee_no": "",
+            }
+
+    with patch(
+        "custom_components.hikvision_access.async_import_statistics"
+    ) as import_stats, patch(
+        "custom_components.hikvision_access.HikAccessClient"
+    ) as cls:
+        client = AsyncMock()
+        client.get_device_info = AsyncMock(
+            return_value={"serial_number": "serial-stats", "model": "M"}
+        )
+        client.probe_readers = AsyncMock(return_value=[
+            ReaderInfo(slot=1, enabled=True, name="Eingang", description=""),
+        ])
+        client.get_acs_work_status = AsyncMock(return_value={"AcsWorkStatus": {}})
+
+        async def empty_events():
+            if False:
+                yield  # pragma: no cover
+        client.events = MagicMock(return_value=empty_events())
+        client.backfill = MagicMock(side_effect=fake_backfill)
+        client.stop = AsyncMock()
+        cls.return_value = client
+
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert import_stats.call_count == 1
+    _hass_arg, metadata, stats = import_stats.call_args.args
+    assert metadata["statistic_id"] == "sensor.hikvision_eingang_total_swipes"
+    assert metadata["unit_of_measurement"] == "swipes"
+    assert metadata["has_sum"] is True
+    # Running sums: 2 events in 08:00 bucket, +1 in 09:00 → 2, 3.
+    sums = [row["sum"] for row in stats]
+    assert sums == [2, 3]

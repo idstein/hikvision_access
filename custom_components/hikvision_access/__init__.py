@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 
+from homeassistant.components.recorder.statistics import (
+    StatisticData,
+    StatisticMetaData,
+    async_import_statistics,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     CONF_HOST,
@@ -95,6 +101,9 @@ async def _run_backfill(hass: HomeAssistant, entry: HikAccessConfigEntry) -> Non
     start = end - timedelta(hours=24)
     iso = lambda dt: dt.isoformat(timespec="seconds").replace("+00:00", "Z")
 
+    # slot -> list of UTC datetimes for events the device replayed
+    replayed_per_slot: dict[int, list[datetime]] = defaultdict(list)
+
     try:
         async for evt in data.client.backfill(
             start_time=iso(start), end_time=iso(end), already_seen=seen
@@ -105,6 +114,10 @@ async def _run_backfill(hass: HomeAssistant, entry: HikAccessConfigEntry) -> Non
             if r is not None:
                 evt["reader_name"] = r.name
                 evt["door_no"] = (r.slot + 1) // 2
+                if evt.get("card_no"):
+                    ts = dt_util.parse_datetime(evt.get("timestamp") or "")
+                    if ts is not None:
+                        replayed_per_slot[r.slot].append(dt_util.as_utc(ts))
             hass.bus.async_fire(EVENT_BUS_NAME, evt)
             async_dispatcher_send(hass, SIGNAL_EVENT, evt)
     except Exception:  # noqa: BLE001
@@ -112,6 +125,37 @@ async def _run_backfill(hass: HomeAssistant, entry: HikAccessConfigEntry) -> Non
             "AcsEvent backfill failed; HA will resume on the next live event",
             exc_info=True,
         )
+
+    # Inject exact hour buckets into long-term statistics so the chart stays
+    # accurate even when ingest time differs from the original event time.
+    if not replayed_per_slot:
+        return
+    for slot, timestamps in replayed_per_slot.items():
+        r = reader_index.get(slot)
+        if r is None:
+            continue
+        from .sensor import _slug
+
+        slug = _slug(r.name, slot)
+        statistic_id = f"sensor.hikvision_{slug}_total_swipes"
+        buckets: dict[datetime, int] = defaultdict(int)
+        for ts in timestamps:
+            bucket = ts.replace(minute=0, second=0, microsecond=0)
+            buckets[bucket] += 1
+        running = 0
+        stats: list[StatisticData] = []
+        for bucket in sorted(buckets):
+            running += buckets[bucket]
+            stats.append({"start": bucket, "sum": running})
+        metadata = StatisticMetaData(
+            source="recorder",
+            statistic_id=statistic_id,
+            unit_of_measurement="swipes",
+            has_mean=False,
+            has_sum=True,
+            name=None,
+        )
+        async_import_statistics(hass, metadata, stats)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: HikAccessConfigEntry) -> bool:
