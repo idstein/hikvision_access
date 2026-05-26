@@ -6,15 +6,32 @@ import json
 from collections.abc import AsyncIterator
 
 
-class MultipartParser:
-    """Incrementally parse application/x-mixed-replace style multipart streams."""
+class MultipartBufferOverflow(RuntimeError):
+    """Raised when the internal buffer grows past ``max_buffer`` without ever
+    seeing a boundary marker — protects against an unresponsive peer that
+    streams bytes without ever delimiting them."""
 
-    def __init__(self, boundary: bytes) -> None:
+
+class MultipartParser:
+    """Incrementally parse application/x-mixed-replace style multipart streams.
+
+    A single instance is NOT safe for concurrent ``feed()`` calls — the buffer
+    is shared mutable state. One parser per connection.
+    """
+
+    DEFAULT_MAX_BUFFER = 1 << 20  # 1 MiB
+
+    def __init__(self, boundary: bytes, max_buffer: int | None = None) -> None:
         self._sep = b"--" + boundary
         self._buf = b""
+        self._max_buffer = max_buffer if max_buffer is not None else self.DEFAULT_MAX_BUFFER
 
     async def feed(self, data: bytes) -> AsyncIterator[dict]:
         self._buf += data
+        if len(self._buf) > self._max_buffer:
+            raise MultipartBufferOverflow(
+                f"buffer exceeded {self._max_buffer} bytes without seeing a boundary"
+            )
         while True:
             # Find a complete part: --boundary <CRLF> headers <CRLF><CRLF> body <CRLF>--boundary
             first = self._buf.find(self._sep)
