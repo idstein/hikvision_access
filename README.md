@@ -22,7 +22,7 @@ Pre-release. Tested against `DS-K2702WX-E1(P)` firmware V1.7.4.
 ## Installation (HACS custom repository)
 
 1. HACS → Integrations → ⋮ → Custom repositories.
-2. Add `paulstrawder/hikvision_access`, category `Integration`.
+2. Add `idstein/hikvision_access`, category `Integration`.
 3. Install, restart HA.
 4. Settings → Devices & Services → Add Integration → "Hikvision Access Control".
 5. Enter host, port (default 443), HTTPS toggle, "Verify SSL" toggle (Hikvision uses self-signed certs by default — leave off unless you've installed a real cert), username (default `admin`), password.
@@ -156,7 +156,7 @@ HA → Settings → Devices & Services → Hikvision Access Control → ⋮ → 
 
 ## Limitations
 
-- WebSocket transport (port 7682) is not implemented in v1 — the alertStream HTTPS multipart channel is documented and covers the same events. Track [#issue](https://github.com/paulstrawder/hikvision_access/issues) if you want WS.
+- WebSocket transport (port 7682) is not implemented in v1 — the alertStream HTTPS multipart channel is documented and covers the same events. Track [#issue](https://github.com/idstein/hikvision_access/issues) if you want WS.
 - Door remote-control (`/AccessControl/RemoteControl/door/<n>`) is not exposed — out of scope for v1.
 - The controller's user database (557 entries on the reference device) is not synced into HA; the integration relays whatever the device puts in the event payload.
 - Multi-controller setups: each controller is one config entry. Unique-visitor counts and statistics are per-reader, not aggregated.
@@ -164,7 +164,7 @@ HA → Settings → Devices & Services → Hikvision Access Control → ⋮ → 
 ## Development
 
 ```bash
-git clone https://github.com/paulstrawder/hikvision_access
+git clone https://github.com/idstein/hikvision_access
 cd hikvision_access
 uv venv
 uv pip install -e '.[dev]'
