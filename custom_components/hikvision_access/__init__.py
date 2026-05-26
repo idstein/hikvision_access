@@ -38,6 +38,7 @@ class HikAccessData:
     device_info: dict[str, str]
     readers: list[ReaderInfo] = field(default_factory=list)
     stream_task: asyncio.Task | None = None
+    coordinator: "AcsWorkStatusCoordinator | None" = None
     # Sentinel — overwritten by AcsWorkStatusCoordinator setup (Task 3.3) once
     # we know how many doors this controller exposes.
     door_count: int = 1
@@ -68,6 +69,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: HikAccessConfigEntry) ->
         raise ConfigEntryNotReady(f"Cannot connect to {d[CONF_HOST]}: {err}") from err
 
     entry.runtime_data = HikAccessData(client=client, device_info=info, readers=readers)
+
+    # Map readers to doors via the Hik convention (readers 2k-1, 2k → door k).
+    # We trust the enabled-reader count rather than the raw slot count: a
+    # controller might expose more slots than wired doors. Fall back to 1.
+    enabled_reader_count = sum(1 for r in readers if r.enabled) or 1
+    door_count = max(1, (enabled_reader_count + 1) // 2)
+    entry.runtime_data.door_count = door_count
+
+    from .coordinator import AcsWorkStatusCoordinator
+    coordinator = AcsWorkStatusCoordinator(
+        hass, client, door_count=door_count, reader_count=enabled_reader_count
+    )
+    await coordinator.async_config_entry_first_refresh()
+    entry.runtime_data.coordinator = coordinator
 
     # Register the device BEFORE forwarding to platforms so child entities'
     # via_device references resolve immediately. The identifier matches the
