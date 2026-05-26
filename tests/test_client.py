@@ -11,7 +11,6 @@ from aiohttp import web
 from custom_components.hikvision_access.api import HikAccessAuthError, HikAccessClient
 
 
-
 async def _alertstream_handler(request: web.Request) -> web.StreamResponse:
     resp = web.StreamResponse(
         status=200,

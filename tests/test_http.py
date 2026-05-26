@@ -8,7 +8,6 @@ from aiohttp import web
 from custom_components.hikvision_access.api import HikAccessClient
 
 
-
 @pytest.mark.asyncio
 async def test_get_device_info(aiohttp_server) -> None:
     async def handler(request: web.Request) -> web.Response:

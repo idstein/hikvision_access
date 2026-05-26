@@ -62,9 +62,10 @@ def test_replay_handles_empty_or_missing_acs_event_key() -> None:
 
 @pytest.mark.asyncio
 async def test_backfill_paginates_until_empty(aiohttp_server) -> None:
+    info_t = {"major": 3, "minor": 1, "time": "t"}
     pages = [
-        {"AcsEvent": {"numOfMatches": 1, "totalMatches": 2, "InfoList": [{"serialNo": 1, "major": 3, "minor": 1, "time": "t"}]}},
-        {"AcsEvent": {"numOfMatches": 1, "totalMatches": 2, "InfoList": [{"serialNo": 2, "major": 3, "minor": 1, "time": "t"}]}},
+        {"AcsEvent": {"numOfMatches": 1, "totalMatches": 2, "InfoList": [{"serialNo": 1, **info_t}]}},
+        {"AcsEvent": {"numOfMatches": 1, "totalMatches": 2, "InfoList": [{"serialNo": 2, **info_t}]}},
         {"AcsEvent": {"numOfMatches": 0, "totalMatches": 2, "InfoList": []}},
     ]
     counter = {"i": 0}

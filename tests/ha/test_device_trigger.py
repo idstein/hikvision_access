@@ -72,7 +72,10 @@ async def test_card_read_trigger_fires(hass: HomeAssistant) -> None:
     })
     hass.bus.async_listen("card_read_observed", lambda e: triggered.append(e))
 
-    hass.bus.async_fire(EVENT_BUS_NAME, {"card_no": "X", "name": "Alice", "reader_no": 1, "minor_label": "card_swiped_valid"})
+    hass.bus.async_fire(
+        EVENT_BUS_NAME,
+        {"card_no": "X", "name": "Alice", "reader_no": 1, "minor_label": "card_swiped_valid"},
+    )
     await hass.async_block_till_done()
     assert triggered, "card_read trigger did not fire"
 
@@ -98,7 +101,10 @@ async def test_card_denied_trigger_only_fires_on_denial(hass: HomeAssistant) -> 
     hass.bus.async_listen("card_denied_observed", lambda e: denied.append(e))
 
     # A regular swipe must NOT fire the denied trigger.
-    hass.bus.async_fire(EVENT_BUS_NAME, {"card_no": "X", "name": "A", "reader_no": 1, "minor_label": "card_swiped_valid"})
+    hass.bus.async_fire(
+        EVENT_BUS_NAME,
+        {"card_no": "X", "name": "A", "reader_no": 1, "minor_label": "card_swiped_valid"},
+    )
     await hass.async_block_till_done()
     assert not denied
 
@@ -111,7 +117,8 @@ async def test_card_denied_trigger_only_fires_on_denial(hass: HomeAssistant) -> 
 @pytest.mark.asyncio
 async def test_async_get_triggers_returns_all_four_types(hass: HomeAssistant) -> None:
     from custom_components.hikvision_access.device_trigger import (
-        TRIGGER_TYPES, async_get_triggers,
+        TRIGGER_TYPES,
+        async_get_triggers,
     )
 
     device_id = await _setup(hass)

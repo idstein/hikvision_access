@@ -67,7 +67,7 @@ class HikAccessConfigFlow(ConfigFlow, domain=DOMAIN):
                 info = await client.get_device_info()
             except HikAccessAuthError:
                 errors["base"] = "invalid_auth"
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _LOGGER.exception("Unexpected error while validating Hikvision config")
                 errors["base"] = "cannot_connect"
             else:

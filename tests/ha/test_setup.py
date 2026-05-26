@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -267,7 +268,7 @@ async def test_backfill_imports_hourly_statistics(hass: HomeAssistant) -> None:
     assert sums == [2, 3]
 
 
-def _parse_iso_window(start_time: str, end_time: str) -> "timedelta":
+def _parse_iso_window(start_time: str, end_time: str) -> timedelta:
     """Parse an ISO8601 backfill window into a timedelta."""
     from datetime import datetime, timedelta  # noqa: F401
 

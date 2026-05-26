@@ -82,7 +82,7 @@ async def _run_stream(hass: HomeAssistant, entry: HikAccessConfigEntry) -> None:
             async_dispatcher_send(hass, SIGNAL_EVENT, evt)
     except asyncio.CancelledError:
         raise
-    except Exception:  # noqa: BLE001
+    except Exception:
         _LOGGER.exception("Hikvision event stream task crashed; events will resume on next entry reload")
 
 
@@ -120,7 +120,9 @@ async def _run_backfill(hass: HomeAssistant, entry: HikAccessConfigEntry) -> Non
 
     end = dt_util.utcnow()
     start = end - timedelta(days=int(backfill_days))
-    iso = lambda dt: dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    def iso(dt: datetime) -> str:
+        return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
 
     # slot -> list of UTC datetimes for events the device replayed
     replayed_per_slot: dict[int, list[datetime]] = defaultdict(list)
@@ -196,7 +198,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HikAccessConfigEntry) ->
     except HikAccessAuthError as err:
         await client.stop()
         raise ConfigEntryAuthFailed(str(err)) from err
-    except Exception as err:  # noqa: BLE001
+    except Exception as err:
         await client.stop()
         raise ConfigEntryNotReady(f"Cannot connect to {d[CONF_HOST]}: {err}") from err
 

@@ -14,7 +14,7 @@ from .events import MAJOR_LABELS, MINOR_EVENT_LABELS
 _LOGGER = logging.getLogger(__name__)
 
 # Hard cap so a stuck cursor (firmware bug, lying ``totalMatches``) can't
-# spin the loop forever. 1000 pages × 30 events/page = up to 30k events
+# spin the loop forever. 1000 pages x 30 events/page = up to 30k events
 # replayed on startup, which is well past any practical HA downtime.
 MAX_PAGES = 1000
 

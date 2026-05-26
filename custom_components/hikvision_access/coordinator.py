@@ -48,6 +48,6 @@ class AcsWorkStatusCoordinator(DataUpdateCoordinator[WorkStatus]):
     async def _async_update_data(self) -> WorkStatus:
         try:
             raw = await self._client.get_acs_work_status()
-        except Exception as err:  # noqa: BLE001
+        except Exception as err:
             raise UpdateFailed(str(err)) from err
         return parse_acs_work_status(raw, self._door_count, self._reader_count)
