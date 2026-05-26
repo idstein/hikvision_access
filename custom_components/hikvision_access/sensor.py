@@ -148,14 +148,17 @@ class TotalSwipesSensor(RestoreEntity, SensorEntity):
 class UniqueVisitorsTodaySensor(RestoreEntity, SensorEntity):
     """Count of distinct cardholders seen today (resets at local midnight).
 
-    Backing store is a Python set of ``card_no`` values; size is the state.
-    The set + names are serialized into entity-state attributes
-    (``card_set`` + ``cardholders``) so a same-day HA restart restores them
-    via RestoreEntity. Capped at 5000 entries to prevent unbounded growth
-    in pathological scenarios.
+    Card numbers are PII — they're treated as credentials by the door
+    controller. To avoid persisting them through HA's recorder DB, the
+    state-store, and the REST/WS APIs, the dedup set holds truncated
+    SHA-256 digests of the raw card numbers instead of the card numbers
+    themselves. Names (often a friendly display name, not a credential)
+    are still exposed via ``cardholders``. RestoreEntity round-trips the
+    digest set so a same-day HA restart resumes the count.
     """
 
     MAX_CARDS = 5000
+    _HASH_PREFIX_BYTES = 8  # 64 bits = 1.8e19 distinct values — collision-safe.
 
     _attr_has_entity_name = False
     _attr_should_poll = False
@@ -174,22 +177,31 @@ class UniqueVisitorsTodaySensor(RestoreEntity, SensorEntity):
             f"Hikvision {reader_name or f'Reader {reader_slot}'} Unique Visitors Today"
         )
         self.entity_id = f"sensor.hikvision_{slug}_unique_visitors_today"
-        self._cards: set[str] = set()
+        self._card_hashes: set[str] = set()
         self._names: set[str] = set()
         self._last_reset = dt_util.start_of_local_day()
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.unique_id or entry.entry_id)},
         )
 
+    @staticmethod
+    def _hash_card(card_no: str) -> str:
+        import hashlib
+
+        return hashlib.sha256(card_no.encode("utf-8")).hexdigest()[
+            : UniqueVisitorsTodaySensor._HASH_PREFIX_BYTES * 2
+        ]
+
     @property
     def native_value(self) -> int:
-        return len(self._cards)
+        return len(self._card_hashes)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return {
             "cardholders": sorted(self._names),
-            "card_set": sorted(self._cards),
+            # Opaque digests, not card numbers — see class docstring.
+            "card_hashes": sorted(self._card_hashes),
             "last_reset": self._last_reset.isoformat(),
         }
 
@@ -204,7 +216,7 @@ class UniqueVisitorsTodaySensor(RestoreEntity, SensorEntity):
                 lr = today
             if lr is not None and lr == today:
                 self._last_reset = lr
-                self._cards = set(last.attributes.get("card_set") or [])
+                self._card_hashes = set(last.attributes.get("card_hashes") or [])
                 self._names = set(last.attributes.get("cardholders") or [])
         self.async_on_remove(
             async_dispatcher_connect(self.hass, SIGNAL_EVENT, self._on_event)
@@ -222,16 +234,16 @@ class UniqueVisitorsTodaySensor(RestoreEntity, SensorEntity):
         card = payload.get("card_no")
         if not card:
             return
-        if len(self._cards) >= self.MAX_CARDS:
+        if len(self._card_hashes) >= self.MAX_CARDS:
             return
-        self._cards.add(card)
+        self._card_hashes.add(self._hash_card(card))
         if payload.get("name"):
             self._names.add(payload["name"])
         self.async_write_ha_state()
 
     @callback
     def _reset_at_midnight(self, _now: datetime) -> None:
-        self._cards.clear()
+        self._card_hashes.clear()
         self._names.clear()
         self._last_reset = dt_util.start_of_local_day()
         self.async_write_ha_state()
