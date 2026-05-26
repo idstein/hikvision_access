@@ -6,6 +6,8 @@ import logging
 from collections.abc import Iterable, Iterator
 from typing import Any
 
+import aiohttp
+
 from .events import MAJOR_LABELS, MINOR_EVENT_LABELS
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,3 +53,38 @@ def replay_page(page: dict[str, Any], already_seen: Iterable[int] = ()) -> Itera
             "timestamp": item.get("time"),
             "backfilled": True,
         }
+
+
+async def fetch_pages(
+    session: aiohttp.ClientSession,
+    base: str,
+    auth: aiohttp.BasicAuth | None,
+    start_time: str,
+    end_time: str,
+    page_size: int = 30,
+):
+    """Yield raw AcsEvent pages until the device returns an empty InfoList."""
+    position = 0
+    search_id = "ha-backfill"
+    while True:
+        body = {
+            "AcsEventCond": {
+                "searchID": search_id,
+                "searchResultPosition": position,
+                "maxResults": page_size,
+                "startTime": start_time,
+                "endTime": end_time,
+            }
+        }
+        async with session.post(
+            f"{base}/ISAPI/AccessControl/AcsEvent?format=json",
+            json=body,
+            auth=auth,
+        ) as r:
+            r.raise_for_status()
+            page = await r.json(content_type=None)
+        info_list = page.get("AcsEvent", {}).get("InfoList", [])
+        if not info_list:
+            return
+        yield page
+        position += len(info_list)

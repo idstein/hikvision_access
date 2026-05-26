@@ -113,3 +113,11 @@ class HikAccessClient:
     async def get_acs_work_status(self):
         from .http import fetch_acs_work_status
         return await fetch_acs_work_status(self._session, self._base_url, self._auth)
+
+    async def backfill(self, start_time: str, end_time: str, already_seen=()):
+        from .backfill import fetch_pages, replay_page
+        seen = set(already_seen)
+        async for page in fetch_pages(self._session, self._base_url, self._auth, start_time, end_time):
+            for evt in replay_page(page, seen):
+                seen.add(evt["serial_no"])
+                yield evt
