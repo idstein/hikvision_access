@@ -124,3 +124,68 @@ async def test_reconnects_after_server_drops(aiohttp_server) -> None:
 
     await asyncio.wait_for(collect(), timeout=3)
     assert received[0]["serial_no"] == 2
+
+
+@pytest.mark.asyncio
+async def test_two_consecutive_401s_escalates_auth_error(aiohttp_server) -> None:
+    app = web.Application()
+    app.router.add_get("/ISAPI/Event/notification/alertStream", _unauthorized_handler)
+    server = await aiohttp_server(app)
+
+    client = HikAccessClient(
+        host="127.0.0.1", port=server.port, username="u", password="p", ssl=False, verify_ssl=False
+    )
+    client._initial_backoff = 0.01
+
+    try:
+        with pytest.raises(HikAccessAuthError):
+            async for _ in client.events():
+                pass
+    finally:
+        await client.stop()
+
+
+@pytest.mark.asyncio
+async def test_auth_error_resets_when_connection_succeeds(aiohttp_server) -> None:
+    """A 401 followed by a successful connect (even without events yielded)
+    followed by another 401 must escalate. Reproduces the reset-on-yield bug."""
+    step = {"n": 0}
+
+    async def sequence_handler(request: web.Request) -> web.StreamResponse:
+        n = step["n"]
+        step["n"] += 1
+        if n == 0:
+            return web.Response(status=401, text="Unauthorized")
+        if n == 1:
+            # Connection succeeds but no AccessControllerEvent gets yielded.
+            resp = web.StreamResponse(
+                status=200,
+                headers={"Content-Type": 'multipart/mixed; boundary="MIME_boundary"'},
+            )
+            await resp.prepare(request)
+            heartbeat = (
+                b"--MIME_boundary\r\nContent-Type: application/json\r\nContent-Length: 27\r\n\r\n"
+                b'{"eventType":"videoloss"}'
+                b"\r\n--MIME_boundary\r\n"
+            )
+            await resp.write(heartbeat)
+            await asyncio.sleep(0.05)
+            return resp
+        # subsequent attempts -> 401 again
+        return web.Response(status=401, text="Unauthorized")
+
+    app = web.Application()
+    app.router.add_get("/ISAPI/Event/notification/alertStream", sequence_handler)
+    server = await aiohttp_server(app)
+
+    client = HikAccessClient(
+        host="127.0.0.1", port=server.port, username="u", password="p", ssl=False, verify_ssl=False
+    )
+    client._initial_backoff = 0.01
+
+    try:
+        with pytest.raises(HikAccessAuthError):
+            async for _ in client.events():
+                pass
+    finally:
+        await client.stop()

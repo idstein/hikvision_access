@@ -90,7 +90,7 @@ class HikAccessClient:
                     self._auth_fail_count += 1
                     if self._auth_fail_count >= _AUTH_FAIL_LIMIT:
                         raise
-                except (aiohttp.ClientError, asyncio.TimeoutError, RuntimeError) as err:
+                except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                     _LOGGER.debug("transport error, will retry: %s", err)
 
                 if self._stop.is_set():
@@ -98,5 +98,6 @@ class HikAccessClient:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, _BACKOFF_MAX)
         finally:
-            # Now that the generator is closing for good, release the session.
+            # Now that the generator is closing for good, release resources.
+            self._transport = None
             await self._session.close()
