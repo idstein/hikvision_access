@@ -138,7 +138,7 @@ async def test_digest_renegotiates_every_request(aiohttp_server) -> None:
         password="secret", ssl=False, verify_ssl=False,
     )
     await client.probe_readers(max_slots=3)
-    assert len(request_log) == 6  # 3 probe calls × (unauth + auth) pair
+    assert len(request_log) == 6  # 3 probe calls x (unauth + auth) pair
     assert request_log[0::2] == [None, None, None]
     for auth_header in request_log[1::2]:
         assert auth_header is not None
