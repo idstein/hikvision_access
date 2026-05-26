@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import Iterable, Iterator
 from typing import Any
 
@@ -11,6 +12,11 @@ import aiohttp
 from .events import MAJOR_LABELS, MINOR_EVENT_LABELS
 
 _LOGGER = logging.getLogger(__name__)
+
+# Hard cap so a stuck cursor (firmware bug, lying ``totalMatches``) can't
+# spin the loop forever. 1000 pages × 30 events/page = up to 30k events
+# replayed on startup, which is well past any practical HA downtime.
+MAX_PAGES = 1000
 
 
 def replay_page(page: dict[str, Any], already_seen: Iterable[int] = ()) -> Iterator[dict[str, Any]]:
@@ -63,10 +69,20 @@ async def fetch_pages(
     end_time: str,
     page_size: int = 30,
 ):
-    """Yield raw AcsEvent pages until the device returns an empty InfoList."""
+    """Yield raw AcsEvent pages until the device returns an empty InfoList.
+
+    Notes:
+    * ``page_size`` defaults to 30 because that's the max the device reports
+      in ``/ISAPI/AccessControl/AcsEvent/capabilities`` (``maxResults @max=30``).
+    * ``searchID`` is a fresh UUID per invocation — Hikvision treats it as a
+      server-side session token, so a shared literal would let two concurrent
+      backfills against the same controller interleave cursors.
+    * Iteration stops at ``MAX_PAGES`` to guard against a stuck cursor or
+      lying ``totalMatches`` field.
+    """
     position = 0
-    search_id = "ha-backfill"
-    while True:
+    search_id = uuid.uuid4().hex
+    for _ in range(MAX_PAGES):
         body = {
             "AcsEventCond": {
                 "searchID": search_id,
@@ -88,3 +104,8 @@ async def fetch_pages(
             return
         yield page
         position += len(info_list)
+    _LOGGER.warning(
+        "AcsEvent backfill hit MAX_PAGES=%d cap (searchID=%s); stopping to avoid an infinite loop",
+        MAX_PAGES,
+        search_id,
+    )

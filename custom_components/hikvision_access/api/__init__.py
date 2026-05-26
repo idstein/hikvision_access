@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from typing import Any
 
 import aiohttp
@@ -114,7 +114,20 @@ class HikAccessClient:
         from .http import fetch_acs_work_status
         return await fetch_acs_work_status(self._session, self._base_url, self._auth)
 
-    async def backfill(self, start_time: str, end_time: str, already_seen=()):
+    async def backfill(
+        self,
+        start_time: str,
+        end_time: str,
+        already_seen: Iterable[int] = (),
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Replay AcsEvents in ``[start_time, end_time]`` that the device buffered.
+
+        ``start_time`` / ``end_time`` are ISO8601 strings with a timezone
+        (e.g. ``"2026-05-26T10:00:00+02:00"`` or ``"...Z"``). Yields
+        normalized event dicts with ``backfilled=True``; serials already in
+        ``already_seen`` are skipped, and any serial yielded is added to
+        the working set so per-page dedup carries across pages.
+        """
         from .backfill import fetch_pages, replay_page
         seen = set(already_seen)
         async for page in fetch_pages(self._session, self._base_url, self._auth, start_time, end_time):

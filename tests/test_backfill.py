@@ -85,3 +85,66 @@ async def test_backfill_paginates_until_empty(aiohttp_server) -> None:
         events.append(e)
     assert [e["serial_no"] for e in events] == [1, 2]
     await client.stop()
+
+
+@pytest.mark.asyncio
+async def test_backfill_caps_pages_when_device_loops(aiohttp_server) -> None:
+    """If the device returns non-empty pages indefinitely (firmware bug or
+    stuck cursor), fetch_pages must stop at MAX_PAGES instead of looping."""
+    from custom_components.hikvision_access.api import backfill as backfill_mod
+
+    async def handler(request: web.Request) -> web.Response:
+        return web.json_response({
+            "AcsEvent": {
+                "InfoList": [{"serialNo": 1, "major": 3, "minor": 1, "time": "t"}],
+                "totalMatches": 9999,
+            }
+        })
+
+    app = web.Application()
+    app.router.add_post("/ISAPI/AccessControl/AcsEvent", handler)
+    server = await aiohttp_server(app)
+    client = HikAccessClient(
+        host="127.0.0.1", port=server.port, username="u", password="p", ssl=False, verify_ssl=False
+    )
+    # Patch the cap down so the test is quick.
+    original_cap = backfill_mod.MAX_PAGES
+    backfill_mod.MAX_PAGES = 3
+    try:
+        count = 0
+        async for _ in client.backfill(start_time="t", end_time="t"):
+            count += 1
+            if count > 100:
+                raise AssertionError("backfill did not terminate")
+        assert count <= 3  # one event per capped page, possibly fewer due to dedup
+    finally:
+        backfill_mod.MAX_PAGES = original_cap
+        await client.stop()
+
+
+@pytest.mark.asyncio
+async def test_backfill_uses_unique_search_id_per_call(aiohttp_server) -> None:
+    """searchID must be unique per fetch_pages invocation so concurrent
+    backfills against the same controller don't share server-side state."""
+    seen_ids: list[str] = []
+
+    async def handler(request: web.Request) -> web.Response:
+        body = await request.json()
+        seen_ids.append(body["AcsEventCond"]["searchID"])
+        return web.json_response({"AcsEvent": {"InfoList": []}})
+
+    app = web.Application()
+    app.router.add_post("/ISAPI/AccessControl/AcsEvent", handler)
+    server = await aiohttp_server(app)
+    client = HikAccessClient(
+        host="127.0.0.1", port=server.port, username="u", password="p", ssl=False, verify_ssl=False
+    )
+    # Two separate calls.
+    async for _ in client.backfill(start_time="t", end_time="t"):
+        pass
+    async for _ in client.backfill(start_time="t", end_time="t"):
+        pass
+    await client.stop()
+
+    assert len(seen_ids) == 2
+    assert seen_ids[0] != seen_ids[1]
