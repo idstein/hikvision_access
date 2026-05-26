@@ -6,9 +6,11 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Iterable
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import aiohttp
 
+from .digest import DigestAuth
 from .transport import AlertStreamTransport
 
 if TYPE_CHECKING:
@@ -32,6 +34,19 @@ class HikAccessAuthError(HikAccessError):
     """
 
 
+def request_uri(url: str) -> str:
+    """Return the request-URI (path + ?query) used in Digest HA2 hashing.
+
+    Exposed for the helper modules in ``api/`` that build their own
+    Authorization header off a ``DigestAuth`` handed down by the client.
+    """
+    parts = urlsplit(url)
+    uri = parts.path or "/"
+    if parts.query:
+        uri = f"{uri}?{parts.query}"
+    return uri
+
+
 class HikAccessClient:
     """Single-controller ISAPI client.
 
@@ -39,6 +54,14 @@ class HikAccessClient:
     that yields normalized AccessControllerEvents and auto-reconnects with
     exponential backoff on transport errors. Two consecutive 401s raise
     ``HikAccessAuthError`` (so HA can surface ``ConfigEntryAuthFailed``).
+
+    Hikvision ISAPI requires HTTP Digest auth (RFC 7616), not Basic, so the
+    client owns a :class:`DigestAuth` helper. ``request_ctx`` does an
+    unauthenticated probe, then retries with the Authorization header once
+    the challenge has been cached. Streaming endpoints (alertStream) need
+    the header up-front and are served via :meth:`_ensure_digest_challenge`,
+    which sends a cheap preflight ``GET /ISAPI/System/deviceInfo`` to fill
+    the cache before opening the stream.
     """
 
     def __init__(
@@ -52,7 +75,7 @@ class HikAccessClient:
     ) -> None:
         self._host = host
         self._port = port
-        self._auth = aiohttp.BasicAuth(username, password) if username else None
+        self._digest = DigestAuth(username, password) if username else None
         scheme = "https" if ssl else "http"
         self._base_url = f"{scheme}://{host}:{port}"
         # ssl=False disables verification; verify_ssl=True needs an explicit
@@ -89,16 +112,51 @@ class HikAccessClient:
         if not self._streaming and not self._session.closed:
             await self._session.close()
 
+    async def _ensure_digest_challenge(self) -> None:
+        """Populate the Digest challenge cache via a cheap preflight.
+
+        Streaming endpoints (alertStream) can't tolerate the 401-then-retry
+        dance — once the body starts flowing we can't roll back. So before
+        opening the stream we issue a one-shot GET against
+        ``/ISAPI/System/deviceInfo``; the 401 it returns carries the
+        ``WWW-Authenticate: Digest`` header we need to build subsequent
+        Authorization values.
+        """
+        if self._digest is None or self._digest.has_challenge:
+            return
+        url = f"{self._base_url}/ISAPI/System/deviceInfo"
+        async with self._session.get(url) as resp:
+            if resp.status == 401:
+                www_auth = resp.headers.get("WWW-Authenticate")
+                if not www_auth:
+                    raise HikAccessAuthError(
+                        "401 response had no WWW-Authenticate header"
+                    )
+                self._digest.handle_challenge(www_auth)
+            # If the server didn't 401 (e.g. anonymous access allowed) we
+            # have nothing to cache and that's fine — request_ctx will skip
+            # the auth branch entirely.
+
     async def events(self) -> AsyncIterator[dict[str, Any]]:
         """Yield normalized events; reconnect with exponential backoff."""
         self._streaming = True
         try:
+            # Make sure we have the digest challenge BEFORE opening the
+            # stream — otherwise the first connect 401s, the retry kicks
+            # in mid-stream, and we get a mess. Preflight failures are
+            # tolerated: if it's a real auth problem, the stream will 401
+            # too and the normal escalation path runs.
+            try:
+                await self._ensure_digest_challenge()
+            except (aiohttp.ClientError, TimeoutError) as err:
+                _LOGGER.debug("digest preflight failed, will let stream surface it: %s", err)
+
             backoff = self._initial_backoff
             while not self._stop.is_set():
                 self._transport = AlertStreamTransport(
                     session=self._session,
                     url=f"{self._base_url}/ISAPI/Event/notification/alertStream",
-                    auth=self._auth,
+                    digest=self._digest,
                 )
                 try:
                     async for evt in self._transport.stream():
@@ -123,17 +181,35 @@ class HikAccessClient:
             if not self._session.closed:
                 await self._session.close()
 
+    def request_ctx(
+        self,
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> _DigestRequestCM:
+        """Return an async context manager that yields an aiohttp response.
+
+        Performs a Digest auth handshake on demand:
+        1. If the challenge cache is empty, fire the request unauth'd. On
+           401, parse the ``WWW-Authenticate`` header and retry with the
+           Authorization header.
+        2. If the cache is populated, send the Authorization header on the
+           first try. If the server returns 401 (e.g. nonce stale), re-parse
+           the challenge and retry once.
+        """
+        return _DigestRequestCM(self, method, url, kwargs)
+
     async def get_device_info(self) -> dict[str, str]:
         from .http import fetch_device_info
-        return await fetch_device_info(self._session, self._base_url, self._auth)
+        return await fetch_device_info(self, self._base_url)
 
     async def probe_readers(self, max_slots: int = 8) -> list[ReaderInfo]:
         from .http import probe_card_readers
-        return await probe_card_readers(self._session, self._base_url, self._auth, max_slots)
+        return await probe_card_readers(self, self._base_url, max_slots)
 
     async def get_acs_work_status(self) -> dict[str, Any]:
         from .http import fetch_acs_work_status
-        return await fetch_acs_work_status(self._session, self._base_url, self._auth)
+        return await fetch_acs_work_status(self, self._base_url)
 
     async def backfill(
         self,
@@ -151,7 +227,89 @@ class HikAccessClient:
         """
         from .backfill import fetch_pages, replay_page
         seen = set(already_seen)
-        async for page in fetch_pages(self._session, self._base_url, self._auth, start_time, end_time):
+        async for page in fetch_pages(self, self._base_url, start_time, end_time):
             for evt in replay_page(page, seen):
                 seen.add(evt["serial_no"])
                 yield evt
+
+
+class _DigestRequestCM:
+    """Async context manager that wraps Digest-aware request issuing.
+
+    Mirrors the call shape of ``aiohttp.ClientSession.request(...)`` so
+    helpers can write ``async with client.request_ctx("GET", url) as r:``
+    in place of ``async with session.get(url, auth=auth) as r:``.
+    """
+
+    def __init__(
+        self,
+        client: HikAccessClient,
+        method: str,
+        url: str,
+        kwargs: dict[str, Any],
+    ) -> None:
+        self._client = client
+        self._method = method
+        self._url = url
+        self._kwargs = kwargs
+        self._resp: aiohttp.ClientResponse | None = None
+
+    async def __aenter__(self) -> aiohttp.ClientResponse:
+        session = self._client._session
+        digest = self._client._digest
+        method = self._method
+        url = self._url
+        kwargs = self._kwargs
+
+        if digest is None:
+            self._resp = await session.request(method, url, **kwargs)
+            return self._resp
+
+        uri = request_uri(url)
+        # Pop headers so we can mutate them without leaking back into the caller.
+        base_headers = dict(kwargs.pop("headers", {}) or {})
+
+        if digest.has_challenge:
+            headers = dict(base_headers)
+            headers["Authorization"] = digest.build_header(method, uri)
+            resp = await session.request(method, url, headers=headers, **kwargs)
+            if resp.status != 401:
+                self._resp = resp
+                return resp
+            # Cached challenge stale — reparse and try once more.
+            www_auth = resp.headers.get("WWW-Authenticate")
+            resp.release()
+            if not www_auth:
+                # Genuine auth failure with no challenge: surface the 401.
+                resp2 = await session.request(method, url, headers=base_headers, **kwargs)
+                self._resp = resp2
+                return resp2
+            digest.handle_challenge(www_auth)
+            headers = dict(base_headers)
+            headers["Authorization"] = digest.build_header(method, uri)
+            resp2 = await session.request(method, url, headers=headers, **kwargs)
+            self._resp = resp2
+            return resp2
+
+        # No cached challenge: try unauth'd first to harvest one.
+        resp = await session.request(method, url, headers=base_headers, **kwargs)
+        if resp.status != 401:
+            self._resp = resp
+            return resp
+        www_auth = resp.headers.get("WWW-Authenticate")
+        resp.release()
+        if not www_auth:
+            # 401 with no challenge — surface it; caller can decide how to react.
+            resp2 = await session.request(method, url, headers=base_headers, **kwargs)
+            self._resp = resp2
+            return resp2
+        digest.handle_challenge(www_auth)
+        headers = dict(base_headers)
+        headers["Authorization"] = digest.build_header(method, uri)
+        resp2 = await session.request(method, url, headers=headers, **kwargs)
+        self._resp = resp2
+        return resp2
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if self._resp is not None and not self._resp.closed:
+            self._resp.release()

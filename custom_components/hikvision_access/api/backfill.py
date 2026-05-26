@@ -5,11 +5,12 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import AsyncIterator, Iterable, Iterator
-from typing import Any
-
-import aiohttp
+from typing import TYPE_CHECKING, Any
 
 from .events import MAJOR_LABELS, MINOR_EVENT_LABELS
+
+if TYPE_CHECKING:
+    from . import HikAccessClient
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,9 +69,8 @@ def replay_page(page: dict[str, Any], already_seen: Iterable[int] = ()) -> Itera
 
 
 async def fetch_pages(
-    session: aiohttp.ClientSession,
+    client: HikAccessClient,
     base: str,
-    auth: aiohttp.BasicAuth | None,
     start_time: str,
     end_time: str,
     page_size: int = 30,
@@ -98,10 +98,10 @@ async def fetch_pages(
                 "endTime": end_time,
             }
         }
-        async with session.post(
+        async with client.request_ctx(
+            "POST",
             f"{base}/ISAPI/AccessControl/AcsEvent?format=json",
             json=body,
-            auth=auth,
         ) as r:
             r.raise_for_status()
             page = await r.json(content_type=None)

@@ -204,3 +204,81 @@ async def test_stop_closes_session_when_events_never_started() -> None:
     )
     await client.stop()
     assert client._session.closed
+
+
+@pytest.mark.asyncio
+async def test_alertstream_with_digest_preflight(aiohttp_server) -> None:
+    """The client must preflight /ISAPI/System/deviceInfo to harvest the
+    Digest challenge, then open the alertStream with Authorization set on
+    the first request — otherwise streaming responses 401-and-retry mid-body."""
+    import hashlib
+    import re
+
+    def _md5(s: str) -> str:
+        return hashlib.md5(s.encode()).hexdigest()
+
+    async def device_info_handler(request: web.Request) -> web.Response:
+        # Always 401 — we just want the preflight to harvest the challenge.
+        return web.Response(
+            status=401,
+            headers={
+                "WWW-Authenticate": (
+                    'Digest realm="Hik", qop="auth", nonce="xyz789", algorithm=MD5'
+                )
+            },
+        )
+
+    async def stream_handler(request: web.Request) -> web.StreamResponse:
+        auth = request.headers.get("Authorization", "")
+        if not auth.lower().startswith("digest"):
+            return web.Response(
+                status=401,
+                headers={
+                    "WWW-Authenticate": (
+                        'Digest realm="Hik", qop="auth", nonce="xyz789", algorithm=MD5'
+                    )
+                },
+            )
+        fields = dict(re.findall(r'(\w+)=("[^"]*"|[^,\s]+)', auth[len("Digest "):]))
+        for k, v in list(fields.items()):
+            fields[k] = v.strip('"')
+        ha1 = _md5("admin:Hik:secret")
+        ha2 = _md5(f"GET:{fields['uri']}")
+        expected = _md5(
+            f"{ha1}:xyz789:{fields['nc']}:{fields['cnonce']}:auth:{ha2}"
+        )
+        if fields.get("response") != expected:
+            return web.Response(status=401, text="bad digest")
+        resp = web.StreamResponse(
+            status=200,
+            headers={"Content-Type": 'multipart/mixed; boundary="MIME_boundary"'},
+        )
+        await resp.prepare(request)
+        body = (
+            b"--MIME_boundary\r\nContent-Type: application/json\r\nContent-Length: 130\r\n\r\n"
+            b'{"eventType":"AccessControllerEvent","dateTime":"2026-05-26T10:00:00Z",'
+            b'"AccessControllerEvent":{"majorEventType":3,"subEventType":1,"serialNo":9}}'
+            b"\r\n--MIME_boundary\r\n"
+        )
+        await resp.write(body)
+        await asyncio.sleep(0.05)
+        return resp
+
+    app = web.Application()
+    app.router.add_get("/ISAPI/System/deviceInfo", device_info_handler)
+    app.router.add_get("/ISAPI/Event/notification/alertStream", stream_handler)
+    server = await aiohttp_server(app)
+
+    received: list[dict[str, Any]] = []
+    client = HikAccessClient(
+        host="127.0.0.1", port=server.port, username="admin", password="secret", ssl=False, verify_ssl=False
+    )
+
+    async def collect():
+        async for evt in client.events():
+            received.append(evt)
+            if len(received) == 1:
+                await client.stop()
+
+    await asyncio.wait_for(collect(), timeout=2)
+    assert received[0]["serial_no"] == 9

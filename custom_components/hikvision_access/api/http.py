@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from xml.etree.ElementTree import fromstring
 
 import aiohttp
 
 from .discovery import ReaderInfo, parse_card_reader_cfg
+
+if TYPE_CHECKING:
+    from . import HikAccessClient
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,9 +36,9 @@ def _camel_to_snake(name: str) -> str:
 
 
 async def fetch_device_info(
-    session: aiohttp.ClientSession, base: str, auth: aiohttp.BasicAuth | None
+    client: HikAccessClient, base: str
 ) -> dict[str, str]:
-    async with session.get(f"{base}/ISAPI/System/deviceInfo", auth=auth) as r:
+    async with client.request_ctx("GET", f"{base}/ISAPI/System/deviceInfo") as r:
         r.raise_for_status()
         body = await r.text()
     # Device is LAN-local and authenticated; defusedxml is overkill here.
@@ -48,16 +51,15 @@ async def fetch_device_info(
 
 
 async def probe_card_readers(
-    session: aiohttp.ClientSession,
+    client: HikAccessClient,
     base: str,
-    auth: aiohttp.BasicAuth | None,
     max_slots: int,
 ) -> list[ReaderInfo]:
     readers: list[ReaderInfo] = []
     for slot in range(1, max_slots + 1):
         url = f"{base}/ISAPI/AccessControl/CardReaderCfg/{slot}?format=json"
         try:
-            async with session.get(url, auth=auth) as r:
+            async with client.request_ctx("GET", url) as r:
                 # content_type=None: some Hikvision endpoints return wrong
                 # Content-Type headers; we still want the JSON body.
                 data = await r.json(content_type=None)
@@ -78,10 +80,10 @@ async def probe_card_readers(
 
 
 async def fetch_acs_work_status(
-    session: aiohttp.ClientSession, base: str, auth: aiohttp.BasicAuth | None
+    client: HikAccessClient, base: str
 ) -> dict[str, Any]:
-    async with session.get(
-        f"{base}/ISAPI/AccessControl/AcsWorkStatus?format=json", auth=auth
+    async with client.request_ctx(
+        "GET", f"{base}/ISAPI/AccessControl/AcsWorkStatus?format=json"
     ) as r:
         r.raise_for_status()
         # content_type=None: see probe_card_readers note above.
