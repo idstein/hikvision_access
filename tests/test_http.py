@@ -101,15 +101,13 @@ async def test_get_device_info_digest_auth(aiohttp_server) -> None:
 
 
 @pytest.mark.asyncio
-async def test_digest_renegotiates_every_request(aiohttp_server) -> None:
-    """Each successful request must re-do the 401-then-retry handshake.
+async def test_digest_challenge_cached_across_requests(aiohttp_server) -> None:
+    """After the first 401, subsequent requests reuse the cached challenge.
 
-    Hikvision firmware rotates the nonce per request or per TCP connection,
-    so caching the challenge between calls reliably 401s. The client's
-    ``__aexit__`` therefore invalidates the cache after every non-401
-    response. This test confirms the pattern: for N probe calls we expect
-    exactly 2N requests on the wire — N unauthenticated 401s followed by N
-    authenticated 200s.
+    Caching is required to avoid tripping Hikvision's IP-filter brute-force
+    counter, which logs every unauthenticated 401 as a failed-login attempt.
+    For N probe calls we expect N+1 requests on the wire: the first one
+    unauthenticated (harvesting the challenge), then N authenticated.
     """
     request_log: list[str | None] = []
 
@@ -138,9 +136,14 @@ async def test_digest_renegotiates_every_request(aiohttp_server) -> None:
         password="secret", ssl=False, verify_ssl=False,
     )
     await client.probe_readers(max_slots=3)
-    assert len(request_log) == 6  # 3 probe calls x (unauth + auth) pair
-    assert request_log[0::2] == [None, None, None]
-    for auth_header in request_log[1::2]:
-        assert auth_header is not None
-        assert auth_header.startswith("Digest")
+    # First request: no Authorization → 401 + retry with auth (2 entries).
+    # Subsequent requests: Authorization on first try (1 entry each).
+    assert request_log[0] is None
+    assert request_log[1] is not None
+    assert request_log[1].startswith("Digest")
+    assert request_log[2] is not None
+    assert request_log[2].startswith("Digest")
+    assert request_log[3] is not None
+    assert request_log[3].startswith("Digest")
+    assert len(request_log) == 4  # 1 unauth + 3 auth (first call doubles, rest single)
     await client.stop()

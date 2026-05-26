@@ -337,18 +337,22 @@ class _DigestRequestCM:
         return resp2
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
-        # Some Hikvision firmwares rotate the digest nonce per request or per
-        # TCP connection. Reusing the cached challenge then 401s with no
-        # useful WWW-Authenticate. After every successful response we drop
-        # the cache so the NEXT request re-negotiates — matching the
-        # behaviour of `curl --digest` (which doesn't cache across calls).
-        # The cost is one extra round-trip per call; for our use cases
-        # (10s coordinator poll + occasional probe) that's negligible.
+        # Keep the digest challenge cached so subsequent requests can send
+        # Authorization on the first try (nc increments to satisfy replay
+        # protection). Refreshing per request would double the request rate
+        # and trip Hikvision's IP-filter "illegal login" counter — every
+        # unauthenticated probe is logged by the device as a failed attempt.
+        #
+        # If the device sends a fresh nonce via the RFC 7616 §3.5
+        # Authentication-Info header on a successful response, fold it into
+        # the cache so the very next request uses the new nonce.
         if (
             self._resp is not None
-            and self._resp.status != 401
+            and self._resp.status not in (401,)
             and self._client._digest is not None
         ):
-            self._client._digest.invalidate()
+            auth_info = self._resp.headers.get("Authentication-Info")
+            if auth_info:
+                self._client._digest.handle_auth_info(auth_info)
         if self._resp is not None and not self._resp.closed:
             self._resp.release()
