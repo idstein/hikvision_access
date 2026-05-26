@@ -79,7 +79,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HikAccessConfigEntry) ->
 
     from .coordinator import AcsWorkStatusCoordinator
     coordinator = AcsWorkStatusCoordinator(
-        hass, client, door_count=door_count, reader_count=enabled_reader_count
+        hass,
+        entry,
+        client,
+        door_count=door_count,
+        reader_count=enabled_reader_count,
     )
     await coordinator.async_config_entry_first_refresh()
     entry.runtime_data.coordinator = coordinator

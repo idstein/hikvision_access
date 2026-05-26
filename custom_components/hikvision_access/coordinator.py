@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -16,11 +17,17 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class AcsWorkStatusCoordinator(DataUpdateCoordinator[WorkStatus]):
-    """Poll AcsWorkStatus on a 10s cadence; surface UpdateFailed on errors."""
+    """Poll AcsWorkStatus on a 10s cadence; surface UpdateFailed on errors.
+
+    ``reader_count`` is the count of *enabled* reader slots; ``parse_acs_work_status``
+    pads or truncates the device's ``cardReaderOnlineStatus`` array to this length
+    so downstream entities can index by slot without bounds checks.
+    """
 
     def __init__(
         self,
         hass: HomeAssistant,
+        config_entry: ConfigEntry,
         client: HikAccessClient,
         door_count: int,
         reader_count: int,
@@ -28,6 +35,9 @@ class AcsWorkStatusCoordinator(DataUpdateCoordinator[WorkStatus]):
         super().__init__(
             hass,
             _LOGGER,
+            # Passing config_entry explicitly future-proofs against the
+            # current_entry ContextVar fallback being deprecated.
+            config_entry=config_entry,
             name=f"{DOMAIN}_acs_work_status",
             update_interval=timedelta(seconds=POLL_INTERVAL_SECONDS),
         )
