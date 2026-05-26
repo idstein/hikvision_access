@@ -38,6 +38,8 @@ class HikAccessData:
     device_info: dict[str, str]
     readers: list[ReaderInfo] = field(default_factory=list)
     stream_task: asyncio.Task | None = None
+    # Sentinel — overwritten by AcsWorkStatusCoordinator setup (Task 3.3) once
+    # we know how many doors this controller exposes.
     door_count: int = 1
 
 
@@ -67,11 +69,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HikAccessConfigEntry) ->
 
     entry.runtime_data = HikAccessData(client=client, device_info=info, readers=readers)
 
-    # Register the controller device so future entities use_via_device / device_info.
+    # Register the device BEFORE forwarding to platforms so child entities'
+    # via_device references resolve immediately. The identifier matches the
+    # config entry's unique_id (set by the config flow to serial-or-host), so
+    # `unique_id` and `(DOMAIN, identifier)` stay in lock-step across reconfigs.
     device_registry = dr.async_get(hass)
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
-        identifiers={(DOMAIN, info.get("serial_number", entry.entry_id))},
+        identifiers={(DOMAIN, entry.unique_id or entry.entry_id)},
         manufacturer="Hikvision",
         model=info.get("model", "Access Controller"),
         name=info.get("device_name", "Hikvision Access Controller"),

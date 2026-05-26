@@ -58,21 +58,29 @@ class HikAccessClient:
         self._stop = asyncio.Event()
         self._initial_backoff = 1.0
         self._auth_fail_count = 0
+        # True while events() is iterating; lets stop() know whether to close
+        # the session itself or defer to events()'s finally clause.
+        self._streaming = False
 
     async def stop(self) -> None:
-        """Signal the event loop to terminate; do NOT close the session here.
+        """Signal the event loop to terminate and release the aiohttp session.
 
-        Session close is performed lazily in ``events()`` when the loop
-        actually exits (either via stop() OR via raised exception), avoiding
-        the aiohttp ``RuntimeError("Connection closed.")`` that happens when
-        the connector is torn down mid-stream.
+        If ``events()`` is currently running, the session is left open — its
+        ``finally`` clause will close it after the in-flight request unwinds,
+        avoiding aiohttp's ``RuntimeError("Connection closed.")`` from
+        mid-stream teardown. If ``events()`` was never called (e.g. the client
+        was only used for ``get_device_info`` in config flow / setup entry),
+        the session is closed here so it doesn't leak.
         """
         self._stop.set()
         if self._transport:
             await self._transport.stop()
+        if not self._streaming and not self._session.closed:
+            await self._session.close()
 
     async def events(self) -> AsyncIterator[dict[str, Any]]:
         """Yield normalized events; reconnect with exponential backoff."""
+        self._streaming = True
         try:
             backoff = self._initial_backoff
             while not self._stop.is_set():
@@ -100,7 +108,9 @@ class HikAccessClient:
         finally:
             # Now that the generator is closing for good, release resources.
             self._transport = None
-            await self._session.close()
+            self._streaming = False
+            if not self._session.closed:
+                await self._session.close()
 
     async def get_device_info(self) -> dict[str, str]:
         from .http import fetch_device_info

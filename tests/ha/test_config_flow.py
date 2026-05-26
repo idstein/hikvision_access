@@ -16,13 +16,25 @@ from custom_components.hikvision_access.const import CONF_VERIFY_SSL, DOMAIN
 
 @pytest.mark.asyncio
 async def test_user_flow_happy_path(hass: HomeAssistant) -> None:
-    with patch("custom_components.hikvision_access.config_flow.HikAccessClient") as client_cls:
+    # Patch BOTH import sites: the config flow imports HikAccessClient from
+    # .api into its own namespace, and the integration's async_setup_entry
+    # — invoked automatically on create_entry — does the same. Without the
+    # second patch a real aiohttp connector + cleanup thread would land in
+    # the HA plugin's verify_cleanup assertion.
+    with patch(
+        "custom_components.hikvision_access.config_flow.HikAccessClient"
+    ) as cf_cls, patch(
+        "custom_components.hikvision_access.HikAccessClient"
+    ) as setup_cls:
         client = AsyncMock()
         client.get_device_info = AsyncMock(
             return_value={"serial_number": "abc", "model": "DS-K2702WX-E1(P)"}
         )
+        client.probe_readers = AsyncMock(return_value=[])
+        client.get_acs_work_status = AsyncMock(return_value={"AcsWorkStatus": {}})
         client.stop = AsyncMock()
-        client_cls.return_value = client
+        cf_cls.return_value = client
+        setup_cls.return_value = client
 
         result = await hass.config_entries.flow.async_init(
             DOMAIN, context={"source": config_entries.SOURCE_USER}
@@ -42,6 +54,7 @@ async def test_user_flow_happy_path(hass: HomeAssistant) -> None:
         )
         assert result2["type"] == "create_entry"
         assert result2["data"][CONF_HOST] == "192.168.0.1"
+        await hass.async_block_till_done()
 
 
 @pytest.mark.asyncio

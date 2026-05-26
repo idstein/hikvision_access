@@ -190,3 +190,18 @@ async def test_auth_error_resets_when_connection_succeeds(aiohttp_server) -> Non
                 pass
     finally:
         await client.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_session_when_events_never_started() -> None:
+    """Construct a client, never call events(), call stop().
+
+    The session must be closed afterwards — otherwise consumers that build
+    a client just to call get_device_info() (e.g. config_flow / setup_entry)
+    would leak an aiohttp.ClientSession on every entry.
+    """
+    client = HikAccessClient(
+        host="127.0.0.1", port=1, username="u", password="p", ssl=False, verify_ssl=False
+    )
+    await client.stop()
+    assert client._session.closed
