@@ -9,6 +9,8 @@ from homeassistant import config_entries
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_SSL, CONF_USERNAME
 from homeassistant.core import HomeAssistant
 
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
 from custom_components.hikvision_access.const import CONF_VERIFY_SSL, DOMAIN
 
 
@@ -86,3 +88,33 @@ async def test_user_flow_cannot_connect(hass: HomeAssistant) -> None:
         )
         assert result2["type"] == "form"
         assert result2["errors"] == {"base": "cannot_connect"}
+
+
+@pytest.mark.asyncio
+async def test_user_flow_aborts_when_already_configured(hass: HomeAssistant) -> None:
+    """Adding a device with a serial already known must abort the flow."""
+    existing = MockConfigEntry(
+        domain=DOMAIN, unique_id="abc", data={CONF_HOST: "old"},
+    )
+    existing.add_to_hass(hass)
+
+    with patch("custom_components.hikvision_access.config_flow.HikAccessClient") as client_cls:
+        client = AsyncMock()
+        client.get_device_info = AsyncMock(
+            return_value={"serial_number": "abc", "model": "DS-K2702WX-E1(P)"}
+        )
+        client.stop = AsyncMock()
+        client_cls.return_value = client
+
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_HOST: "192.168.0.1", CONF_PORT: 443, CONF_SSL: True,
+                CONF_VERIFY_SSL: False, CONF_USERNAME: "admin", CONF_PASSWORD: "pw",
+            },
+        )
+    assert result2["type"] == "abort"
+    assert result2["reason"] == "already_configured"

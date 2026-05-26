@@ -36,15 +36,16 @@ class HikAccessConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
         if user_input is not None:
-            client = HikAccessClient(
-                host=user_input[CONF_HOST],
-                port=user_input[CONF_PORT],
-                username=user_input[CONF_USERNAME],
-                password=user_input[CONF_PASSWORD],
-                ssl=user_input[CONF_SSL],
-                verify_ssl=user_input[CONF_VERIFY_SSL],
-            )
+            client: HikAccessClient | None = None
             try:
+                client = HikAccessClient(
+                    host=user_input[CONF_HOST],
+                    port=user_input[CONF_PORT],
+                    username=user_input[CONF_USERNAME],
+                    password=user_input[CONF_PASSWORD],
+                    ssl=user_input[CONF_SSL],
+                    verify_ssl=user_input[CONF_VERIFY_SSL],
+                )
                 info = await client.get_device_info()
             except HikAccessAuthError:
                 errors["base"] = "invalid_auth"
@@ -52,13 +53,21 @@ class HikAccessConfigFlow(ConfigFlow, domain=DOMAIN):
                 _LOGGER.exception("Unexpected error while validating Hikvision config")
                 errors["base"] = "cannot_connect"
             else:
-                serial = info.get("serial_number", user_input[CONF_HOST])
+                serial = info.get("serial_number")
+                if not serial:
+                    _LOGGER.warning(
+                        "Hikvision device returned no serial_number; "
+                        "falling back to host (%s) as the unique_id",
+                        user_input[CONF_HOST],
+                    )
+                    serial = user_input[CONF_HOST]
                 await self.async_set_unique_id(serial)
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
                     title=info.get("model", "Hikvision"), data=user_input
                 )
             finally:
-                await client.stop()
+                if client is not None:
+                    await client.stop()
 
         return self.async_show_form(step_id="user", data_schema=SCHEMA, errors=errors)
