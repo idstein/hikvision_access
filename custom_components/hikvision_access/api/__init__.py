@@ -106,7 +106,7 @@ class HikAccessClient:
                     self._auth_fail_count += 1
                     if self._auth_fail_count >= _AUTH_FAIL_LIMIT:
                         raise
-                except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                except (aiohttp.ClientError, TimeoutError) as err:
                     _LOGGER.debug("transport error, will retry: %s", err)
 
                 if self._stop.is_set():

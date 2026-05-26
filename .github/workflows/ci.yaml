@@ -41,3 +41,6 @@ jobs:
       - uses: hacs/action@main
         with:
           category: integration
+          # 'brands' requires registration in the home-assistant/brands repo;
+          # noisy until the integration is published. Re-enable after submission.
+          ignore: brands
