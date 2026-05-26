@@ -90,6 +90,17 @@ class HikAccessConfigFlow(ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(step_id="user", data_schema=SCHEMA, errors=errors)
 
+    async def async_step_reauth(
+        self, entry_data: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """Entry-point HA uses when async_setup_entry raises ConfigEntryAuthFailed.
+
+        Routes the user back to the standard user step so they can re-enter
+        credentials. We don't keep any reauth-specific state — the flow just
+        reuses the existing schema with the prior host/username pre-filled.
+        """
+        return await self.async_step_user()
+
     @staticmethod
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
