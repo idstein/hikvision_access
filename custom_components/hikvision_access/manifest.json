@@ -1,14 +1,14 @@
 {
   "domain": "hikvision_access",
   "name": "Hikvision Access Control",
-  "version": "0.1.0",
-  "config_flow": true,
-  "documentation": "https://github.com/idstein/hikvision_access",
-  "issue_tracker": "https://github.com/idstein/hikvision_access/issues",
+  "after_dependencies": ["recorder"],
   "codeowners": ["@idstein"],
-  "iot_class": "local_push",
-  "integration_type": "device",
-  "requirements": [],
+  "config_flow": true,
   "dependencies": [],
-  "after_dependencies": ["recorder"]
+  "documentation": "https://github.com/idstein/hikvision_access",
+  "integration_type": "device",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/idstein/hikvision_access/issues",
+  "requirements": [],
+  "version": "0.1.0"
 }

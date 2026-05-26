@@ -7,6 +7,7 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
 from homeassistant.components.recorder.statistics import (
     StatisticData,
@@ -39,6 +40,9 @@ from .const import (
     SIGNAL_EVENT,
 )
 
+if TYPE_CHECKING:
+    from .coordinator import AcsWorkStatusCoordinator
+
 _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BINARY_SENSOR]
@@ -52,7 +56,7 @@ class HikAccessData:
     device_info: dict[str, str]
     readers: list[ReaderInfo] = field(default_factory=list)
     stream_task: asyncio.Task | None = None
-    coordinator: "AcsWorkStatusCoordinator | None" = None
+    coordinator: AcsWorkStatusCoordinator | None = None
     # Sentinel — overwritten by AcsWorkStatusCoordinator setup (Task 3.3) once
     # we know how many doors this controller exposes.
     door_count: int = 1
