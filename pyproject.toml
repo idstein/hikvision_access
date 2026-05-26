@@ -31,3 +31,9 @@ files = ["custom_components/hikvision_access/api"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# pytest-homeassistant-custom-component aggressively asserts test isolation
+# (no lingering threads, no lingering tasks, default-blocks sockets) which
+# conflicts with our pure-aiohttp tests in tests/test_client.py and
+# tests/test_http.py. HA-flavoured tests will live in tests/ha/ and run
+# with `pytest tests/ha/` (which re-enables the plugin via its own conftest).
+addopts = "-p no:homeassistant"
