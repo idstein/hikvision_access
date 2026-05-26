@@ -101,9 +101,16 @@ async def test_get_device_info_digest_auth(aiohttp_server) -> None:
 
 
 @pytest.mark.asyncio
-async def test_digest_challenge_cached_across_requests(aiohttp_server) -> None:
-    """After the first 401, subsequent requests must include Authorization
-    on the first try — proves the challenge cache is shared per client."""
+async def test_digest_renegotiates_every_request(aiohttp_server) -> None:
+    """Each successful request must re-do the 401-then-retry handshake.
+
+    Hikvision firmware rotates the nonce per request or per TCP connection,
+    so caching the challenge between calls reliably 401s. The client's
+    ``__aexit__`` therefore invalidates the cache after every non-401
+    response. This test confirms the pattern: for N probe calls we expect
+    exactly 2N requests on the wire — N unauthenticated 401s followed by N
+    authenticated 200s.
+    """
     request_log: list[str | None] = []
 
     async def handler(request: web.Request) -> web.Response:
@@ -118,7 +125,6 @@ async def test_digest_challenge_cached_across_requests(aiohttp_server) -> None:
                     )
                 },
             )
-        # Return a usable CardReaderCfg so the probe loop keeps going.
         slot = request.match_info["slot"]
         return web.json_response(
             {"CardReaderCfg": {"enable": True, "cardReaderName": f"R{slot}"}}
@@ -128,16 +134,13 @@ async def test_digest_challenge_cached_across_requests(aiohttp_server) -> None:
     app.router.add_get("/ISAPI/AccessControl/CardReaderCfg/{slot}", handler)
     server = await aiohttp_server(app)
     client = HikAccessClient(
-        host="127.0.0.1", port=server.port, username="admin", password="secret", ssl=False, verify_ssl=False
+        host="127.0.0.1", port=server.port, username="admin",
+        password="secret", ssl=False, verify_ssl=False,
     )
     await client.probe_readers(max_slots=3)
-    # First request: no Authorization → 401 + retry with auth.
-    # Subsequent requests: Authorization on first try (cached challenge).
-    assert request_log[0] is None
-    assert request_log[1] is not None
-    assert request_log[1].startswith("Digest")
-    # After the first round-trip, slot=2 sends the Authorization header
-    # on the FIRST try (no preliminary 401-and-retry).
-    assert request_log[2] is not None
-    assert request_log[2].startswith("Digest")
+    assert len(request_log) == 6  # 3 probe calls × (unauth + auth) pair
+    assert request_log[0::2] == [None, None, None]
+    for auth_header in request_log[1::2]:
+        assert auth_header is not None
+        assert auth_header.startswith("Digest")
     await client.stop()
