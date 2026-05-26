@@ -30,9 +30,18 @@ async def async_setup_entry(
     for door in range(1, door_count + 1):
         entities.append(DoorOpenBinarySensor(entry, coordinator, door))
         entities.append(DoorLockBinarySensor(entry, coordinator, door))
+    # The device's cardReaderOnlineStatus array is dense — one entry per
+    # ENABLED reader, in probe-order. Track each reader's position-among-
+    # enabled so the entity reads the right slot at runtime.
+    enabled_index = 0
     for r in data.readers:
         if r.enabled:
-            entities.append(ReaderOnlineBinarySensor(entry, coordinator, r.slot, r.name))
+            entities.append(
+                ReaderOnlineBinarySensor(
+                    entry, coordinator, slot=r.slot, name=r.name, enabled_index=enabled_index
+                )
+            )
+            enabled_index += 1
     entities.append(ControllerTamperBinarySensor(entry, coordinator))
     async_add_entities(entities)
 
@@ -66,7 +75,7 @@ class DoorOpenBinarySensor(_Base):
     @property
     def is_on(self) -> bool | None:
         ws: WorkStatus | None = self.coordinator.data
-        if ws is None or self._door - 1 >= len(ws.door_open):
+        if ws is None or self._door < 1 or self._door - 1 >= len(ws.door_open):
             return None
         return ws.door_open[self._door - 1]
 
@@ -88,7 +97,7 @@ class DoorLockBinarySensor(_Base):
     @property
     def is_on(self) -> bool | None:
         ws: WorkStatus | None = self.coordinator.data
-        if ws is None or self._door - 1 >= len(ws.door_lock):
+        if ws is None or self._door < 1 or self._door - 1 >= len(ws.door_lock):
             return None
         # door_lock True = locked, but device_class=lock wants is_on = unlocked.
         return not ws.door_lock[self._door - 1]
@@ -103,9 +112,13 @@ class ReaderOnlineBinarySensor(_Base):
         coordinator: AcsWorkStatusCoordinator,
         slot: int,
         name: str,
+        enabled_index: int,
     ) -> None:
         super().__init__(entry, coordinator)
         self._slot = slot
+        # Position in the device's dense cardReaderOnlineStatus array
+        # (= count of enabled readers preceding this one in probe order).
+        self._enabled_index = enabled_index
         slug = _slug(name, slot)
         self._attr_unique_id = f"{entry.unique_id}_reader_{slot}_online"
         self._attr_name = f"Hikvision {name or f'Reader {slot}'} Online"
@@ -114,9 +127,11 @@ class ReaderOnlineBinarySensor(_Base):
     @property
     def is_on(self) -> bool | None:
         ws: WorkStatus | None = self.coordinator.data
-        if ws is None or self._slot - 1 >= len(ws.reader_online):
+        if ws is None or self._enabled_index < 0 or self._enabled_index >= len(
+            ws.reader_online
+        ):
             return None
-        return ws.reader_online[self._slot - 1]
+        return ws.reader_online[self._enabled_index]
 
 
 class ControllerTamperBinarySensor(_Base):
