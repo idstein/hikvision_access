@@ -92,3 +92,56 @@ async def test_setup_raises_not_ready_on_connect_failure(hass: HomeAssistant) ->
         await hass.async_block_till_done()
         assert entry.state == ConfigEntryState.SETUP_RETRY
         client.stop.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_dispatches_events(hass: HomeAssistant) -> None:
+    """Events yielded by client.events() must fire on the HA event bus + dispatcher
+    after being enriched with device_id / reader_name / door_no."""
+    from homeassistant.helpers.dispatcher import async_dispatcher_connect
+
+    from custom_components.hikvision_access.api.discovery import ReaderInfo
+    from custom_components.hikvision_access.const import EVENT_BUS_NAME, SIGNAL_EVENT
+
+    entry = _build_entry()
+    entry.add_to_hass(hass)
+
+    async def fake_events():
+        yield {
+            "device_id": None, "controller": "", "reader_no": 1, "reader_name": None,
+            "door_no": None, "card_no": "X", "name": "Alice",
+            "minor_label": "card_swiped_valid", "serial_no": 1,
+            "timestamp": "2026-05-26T10:00:00Z", "backfilled": False,
+            "major": "event", "minor": 1, "employee_no": "",
+        }
+
+    received_dispatcher: list[dict] = []
+    received_bus: list = []
+    async_dispatcher_connect(hass, SIGNAL_EVENT, lambda p: received_dispatcher.append(p))
+    hass.bus.async_listen(EVENT_BUS_NAME, lambda e: received_bus.append(e))
+
+    with patch("custom_components.hikvision_access.HikAccessClient") as cls:
+        client = AsyncMock()
+        client.get_device_info = AsyncMock(
+            return_value={"serial_number": "serial-stream", "model": "DS-K2702WX-E1(P)"}
+        )
+        client.probe_readers = AsyncMock(return_value=[
+            ReaderInfo(slot=1, enabled=True, name="Eingang", description=""),
+        ])
+        client.get_acs_work_status = AsyncMock(return_value={"AcsWorkStatus": {}})
+        client.events = MagicMock(return_value=fake_events())
+        client.stop = AsyncMock()
+        cls.return_value = client
+
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert received_dispatcher, "dispatcher signal was not received"
+    payload = received_dispatcher[0]
+    assert payload["name"] == "Alice"
+    assert payload["device_id"] == "serial-stream"   # enriched from deviceInfo
+    assert payload["reader_name"] == "Eingang"        # enriched from probe_readers
+    assert payload["door_no"] == 1                    # enriched via reader→door map
+    # Event bus also fired:
+    assert received_bus, "event bus did not receive the event"
+    assert received_bus[0].data["name"] == "Alice"

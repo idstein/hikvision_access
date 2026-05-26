@@ -18,10 +18,11 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .api import HikAccessAuthError, HikAccessClient
 from .api.discovery import ReaderInfo
-from .const import CONF_VERIFY_SSL, DOMAIN
+from .const import CONF_VERIFY_SSL, DOMAIN, EVENT_BUS_NAME, SIGNAL_EVENT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -43,6 +44,27 @@ class HikAccessData:
 
 
 type HikAccessConfigEntry = ConfigEntry[HikAccessData]
+
+
+async def _run_stream(hass: HomeAssistant, entry: HikAccessConfigEntry) -> None:
+    """Consume HikAccessClient.events(), enrich, and fan out to bus + dispatcher."""
+    data = entry.runtime_data
+    info = data.device_info
+    reader_index = {r.slot: r for r in data.readers}
+    try:
+        async for evt in data.client.events():
+            evt["device_id"] = info.get("serial_number") or entry.unique_id or entry.entry_id
+            evt["controller"] = evt.get("controller") or info.get("device_name", "")
+            r = reader_index.get(evt.get("reader_no"))
+            if r is not None:
+                evt["reader_name"] = r.name
+                evt["door_no"] = (r.slot + 1) // 2
+            hass.bus.async_fire(EVENT_BUS_NAME, evt)
+            async_dispatcher_send(hass, SIGNAL_EVENT, evt)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001
+        _LOGGER.exception("Hikvision event stream task crashed; events will resume on next entry reload")
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: HikAccessConfigEntry) -> bool:
@@ -101,6 +123,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HikAccessConfigEntry) ->
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    entry.runtime_data.stream_task = hass.loop.create_task(_run_stream(hass, entry))
     return True
 
 
