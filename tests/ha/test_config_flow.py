@@ -1,0 +1,88 @@
+"""Tests for the Hikvision Access config flow."""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from homeassistant import config_entries
+from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT, CONF_SSL, CONF_USERNAME
+from homeassistant.core import HomeAssistant
+
+from custom_components.hikvision_access.const import CONF_VERIFY_SSL, DOMAIN
+
+
+@pytest.mark.asyncio
+async def test_user_flow_happy_path(hass: HomeAssistant) -> None:
+    with patch("custom_components.hikvision_access.config_flow.HikAccessClient") as client_cls:
+        client = AsyncMock()
+        client.get_device_info = AsyncMock(
+            return_value={"serial_number": "abc", "model": "DS-K2702WX-E1(P)"}
+        )
+        client.stop = AsyncMock()
+        client_cls.return_value = client
+
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        assert result["type"] == "form"
+
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_HOST: "192.168.0.1",
+                CONF_PORT: 443,
+                CONF_SSL: True,
+                CONF_VERIFY_SSL: False,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "pw",
+            },
+        )
+        assert result2["type"] == "create_entry"
+        assert result2["data"][CONF_HOST] == "192.168.0.1"
+
+
+@pytest.mark.asyncio
+async def test_user_flow_invalid_auth(hass: HomeAssistant) -> None:
+    from custom_components.hikvision_access.api import HikAccessAuthError
+
+    with patch("custom_components.hikvision_access.config_flow.HikAccessClient") as client_cls:
+        client = AsyncMock()
+        client.get_device_info = AsyncMock(side_effect=HikAccessAuthError("nope"))
+        client.stop = AsyncMock()
+        client_cls.return_value = client
+
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_HOST: "h", CONF_PORT: 443, CONF_SSL: True, CONF_VERIFY_SSL: False,
+                CONF_USERNAME: "admin", CONF_PASSWORD: "wrong",
+            },
+        )
+        assert result2["type"] == "form"
+        assert result2["errors"] == {"base": "invalid_auth"}
+
+
+@pytest.mark.asyncio
+async def test_user_flow_cannot_connect(hass: HomeAssistant) -> None:
+    with patch("custom_components.hikvision_access.config_flow.HikAccessClient") as client_cls:
+        client = AsyncMock()
+        client.get_device_info = AsyncMock(side_effect=OSError("connection refused"))
+        client.stop = AsyncMock()
+        client_cls.return_value = client
+
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": config_entries.SOURCE_USER}
+        )
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_HOST: "h", CONF_PORT: 443, CONF_SSL: True, CONF_VERIFY_SSL: False,
+                CONF_USERNAME: "admin", CONF_PASSWORD: "pw",
+            },
+        )
+        assert result2["type"] == "form"
+        assert result2["errors"] == {"base": "cannot_connect"}
