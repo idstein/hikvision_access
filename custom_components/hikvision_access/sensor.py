@@ -112,6 +112,11 @@ class TotalSwipesSensor(RestoreEntity, SensorEntity):
         self._attr_name = f"Hikvision {reader_name or f'Reader {reader_slot}'} Total Swipes"
         self.entity_id = f"sensor.hikvision_{slug}_total_swipes"
         self._count = 0
+        # Highest AcsEvent serial_no observed across all readers' lifetime.
+        # Persisted as the ``last_serial_no`` state attribute so the startup
+        # backfill (Task 5.2) can skip already-ingested events in the
+        # controller's AcsEvent buffer.
+        self._last_serial: int | None = None
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.unique_id or entry.entry_id)},
         )
@@ -119,6 +124,10 @@ class TotalSwipesSensor(RestoreEntity, SensorEntity):
     @property
     def native_value(self) -> int:
         return self._count
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"last_serial_no": self._last_serial}
 
     async def async_added_to_hass(self) -> None:
         """Restore counter from last state and subscribe to events."""
@@ -129,6 +138,9 @@ class TotalSwipesSensor(RestoreEntity, SensorEntity):
                 self._count = int(float(last.state))
             except (TypeError, ValueError):
                 self._count = 0
+            ls = last.attributes.get("last_serial_no")
+            if isinstance(ls, int):
+                self._last_serial = ls
         self.async_on_remove(
             async_dispatcher_connect(self.hass, SIGNAL_EVENT, self._on_event)
         )
@@ -142,6 +154,9 @@ class TotalSwipesSensor(RestoreEntity, SensorEntity):
         if not payload.get("card_no"):
             return
         self._count += 1
+        serial = payload.get("serial_no")
+        if isinstance(serial, int):
+            self._last_serial = max(self._last_serial or 0, serial)
         self.async_write_ha_state()
 
 

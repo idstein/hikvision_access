@@ -277,3 +277,53 @@ async def test_unique_visitors_dedups_and_persists_cardholders(hass: HomeAssista
     assert state is not None
     assert int(state.state) == 2
     assert state.attributes.get("cardholders") == ["Alice", "Bob"]
+
+
+@pytest.mark.asyncio
+async def test_total_swipes_persists_last_serial_no(hass: HomeAssistant) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_HOST: "h", CONF_PORT: 443, CONF_SSL: True, CONF_VERIFY_SSL: False,
+            CONF_USERNAME: "admin", CONF_PASSWORD: "pw",
+        },
+        unique_id="serial-lastserial",
+    )
+    entry.add_to_hass(hass)
+
+    with patch("custom_components.hikvision_access.HikAccessClient") as cls:
+        client = AsyncMock()
+        client.get_device_info = AsyncMock(
+            return_value={"serial_number": "serial-lastserial", "model": "M"}
+        )
+        client.probe_readers = AsyncMock(return_value=[
+            ReaderInfo(slot=1, enabled=True, name="Eingang", description=""),
+        ])
+        client.get_acs_work_status = AsyncMock(return_value={"AcsWorkStatus": {}})
+
+        async def empty():
+            if False:
+                yield  # pragma: no cover
+        client.events = MagicMock(return_value=empty())
+        client.stop = AsyncMock()
+        cls.return_value = client
+
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    # Dispatch out-of-order serial numbers — last_serial_no should track the max.
+    for serial in (5, 3, 9, 7):
+        async_dispatcher_send(
+            hass, SIGNAL_EVENT,
+            {
+                "controller": "C", "reader_no": 1, "reader_name": "Eingang",
+                "door_no": 1, "card_no": f"card{serial}", "name": "x",
+                "minor_label": "card_swiped_valid", "serial_no": serial,
+                "timestamp": "t", "backfilled": False, "major": "event",
+                "minor": 1, "employee_no": "",
+            },
+        )
+        await hass.async_block_till_done()
+
+    state = hass.states.get("sensor.hikvision_eingang_total_swipes")
+    assert state.attributes.get("last_serial_no") == 9
