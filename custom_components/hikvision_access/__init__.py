@@ -192,53 +192,69 @@ async def async_setup_entry(hass: HomeAssistant, entry: HikAccessConfigEntry) ->
         ssl=d[CONF_SSL],
         verify_ssl=d[CONF_VERIFY_SSL],
     )
+    # Single broad try/except so any failure between client construction and
+    # the stream task being scheduled triggers client.stop() — otherwise the
+    # aiohttp session leaks ("Unclosed client session" log line) on every
+    # ConfigEntryNotReady retry.
     try:
-        info = await client.get_device_info()
-        readers = await client.probe_readers()
-    except HikAccessAuthError as err:
+        try:
+            info = await client.get_device_info()
+            readers = await client.probe_readers()
+        except HikAccessAuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
+        except Exception as err:
+            raise ConfigEntryNotReady(
+                f"Cannot connect to {d[CONF_HOST]}: {err}"
+            ) from err
+
+        entry.runtime_data = HikAccessData(
+            client=client, device_info=info, readers=readers
+        )
+
+        # Map readers to doors via the Hik convention (readers 2k-1, 2k → door k).
+        # We trust the enabled-reader count rather than the raw slot count: a
+        # controller might expose more slots than wired doors. Fall back to 1.
+        enabled_reader_count = sum(1 for r in readers if r.enabled) or 1
+        door_count = max(1, (enabled_reader_count + 1) // 2)
+        entry.runtime_data.door_count = door_count
+
+        from .coordinator import AcsWorkStatusCoordinator
+        coordinator = AcsWorkStatusCoordinator(
+            hass,
+            entry,
+            client,
+            door_count=door_count,
+            reader_count=enabled_reader_count,
+        )
+        await coordinator.async_config_entry_first_refresh()
+        entry.runtime_data.coordinator = coordinator
+
+        # Register the device BEFORE forwarding to platforms so child entities'
+        # via_device references resolve immediately. The identifier matches the
+        # config entry's unique_id (set by the config flow to serial-or-host),
+        # so `unique_id` and `(DOMAIN, identifier)` stay in lock-step across
+        # reconfigs.
+        device_registry = dr.async_get(hass)
+        device_registry.async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, entry.unique_id or entry.entry_id)},
+            manufacturer="Hikvision",
+            model=info.get("model", "Access Controller"),
+            name=info.get("device_name", "Hikvision Access Controller"),
+            sw_version=info.get("firmware_version"),
+        )
+
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+        entry.runtime_data.stream_task = hass.loop.create_task(
+            _run_stream(hass, entry)
+        )
+    except BaseException:
+        # Any failure (including ConfigEntryNotReady / ConfigEntryAuthFailed
+        # / CancelledError): close the client so its aiohttp session doesn't
+        # leak. HA will recreate the entry on the next retry.
         await client.stop()
-        raise ConfigEntryAuthFailed(str(err)) from err
-    except Exception as err:
-        await client.stop()
-        raise ConfigEntryNotReady(f"Cannot connect to {d[CONF_HOST]}: {err}") from err
-
-    entry.runtime_data = HikAccessData(client=client, device_info=info, readers=readers)
-
-    # Map readers to doors via the Hik convention (readers 2k-1, 2k → door k).
-    # We trust the enabled-reader count rather than the raw slot count: a
-    # controller might expose more slots than wired doors. Fall back to 1.
-    enabled_reader_count = sum(1 for r in readers if r.enabled) or 1
-    door_count = max(1, (enabled_reader_count + 1) // 2)
-    entry.runtime_data.door_count = door_count
-
-    from .coordinator import AcsWorkStatusCoordinator
-    coordinator = AcsWorkStatusCoordinator(
-        hass,
-        entry,
-        client,
-        door_count=door_count,
-        reader_count=enabled_reader_count,
-    )
-    await coordinator.async_config_entry_first_refresh()
-    entry.runtime_data.coordinator = coordinator
-
-    # Register the device BEFORE forwarding to platforms so child entities'
-    # via_device references resolve immediately. The identifier matches the
-    # config entry's unique_id (set by the config flow to serial-or-host), so
-    # `unique_id` and `(DOMAIN, identifier)` stay in lock-step across reconfigs.
-    device_registry = dr.async_get(hass)
-    device_registry.async_get_or_create(
-        config_entry_id=entry.entry_id,
-        identifiers={(DOMAIN, entry.unique_id or entry.entry_id)},
-        manufacturer="Hikvision",
-        model=info.get("model", "Access Controller"),
-        name=info.get("device_name", "Hikvision Access Controller"),
-        sw_version=info.get("firmware_version"),
-    )
-
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
-    entry.runtime_data.stream_task = hass.loop.create_task(_run_stream(hass, entry))
+        raise
 
     hass.async_create_task(_run_backfill(hass, entry))
 

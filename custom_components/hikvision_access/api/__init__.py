@@ -276,18 +276,35 @@ class _DigestRequestCM:
             if resp.status != 401:
                 self._resp = resp
                 return resp
-            # Cached challenge stale — reparse and try once more.
+            # Cached challenge stale (nonce expired or device rotated). Reparse
+            # and try once more. NEVER fall back to an unauthenticated retry —
+            # that just guarantees another 401.
             www_auth = resp.headers.get("WWW-Authenticate")
+            _LOGGER.debug(
+                "Digest 401 on %s after cached-challenge attempt; WWW-Authenticate=%r",
+                url, www_auth,
+            )
             resp.release()
-            if not www_auth:
-                # Genuine auth failure with no challenge: surface the 401.
-                resp2 = await session.request(method, url, headers=base_headers, **kwargs)
-                self._resp = resp2
-                return resp2
+            if not www_auth or "digest" not in www_auth.lower():
+                # The device 401'd without a fresh challenge — invalidate our
+                # cache so the next request_ctx triggers a fresh preflight,
+                # then surface this 401 to the caller.
+                digest.invalidate()
+                self._resp = resp
+                return resp
             digest.handle_challenge(www_auth)
             headers = dict(base_headers)
             headers["Authorization"] = digest.build_header(method, uri)
             resp2 = await session.request(method, url, headers=headers, **kwargs)
+            if resp2.status == 401:
+                _LOGGER.debug(
+                    "Digest still 401 after stale-nonce retry on %s; "
+                    "WWW-Authenticate=%r",
+                    url, resp2.headers.get("WWW-Authenticate"),
+                )
+                # Make sure the next attempt does a fresh preflight rather than
+                # reusing whatever the device just rejected.
+                digest.invalidate()
             self._resp = resp2
             return resp2
 
@@ -297,19 +314,41 @@ class _DigestRequestCM:
             self._resp = resp
             return resp
         www_auth = resp.headers.get("WWW-Authenticate")
+        _LOGGER.debug(
+            "Digest 401 on %s (cache empty); WWW-Authenticate=%r", url, www_auth,
+        )
         resp.release()
-        if not www_auth:
-            # 401 with no challenge — surface it; caller can decide how to react.
-            resp2 = await session.request(method, url, headers=base_headers, **kwargs)
-            self._resp = resp2
-            return resp2
+        if not www_auth or "digest" not in www_auth.lower():
+            # No usable challenge — let the caller surface the 401.
+            self._resp = resp
+            return resp
         digest.handle_challenge(www_auth)
         headers = dict(base_headers)
         headers["Authorization"] = digest.build_header(method, uri)
         resp2 = await session.request(method, url, headers=headers, **kwargs)
+        if resp2.status == 401:
+            _LOGGER.debug(
+                "Digest still 401 after initial challenge harvest on %s; "
+                "WWW-Authenticate=%r",
+                url, resp2.headers.get("WWW-Authenticate"),
+            )
+            digest.invalidate()
         self._resp = resp2
         return resp2
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        # Some Hikvision firmwares rotate the digest nonce per request or per
+        # TCP connection. Reusing the cached challenge then 401s with no
+        # useful WWW-Authenticate. After every successful response we drop
+        # the cache so the NEXT request re-negotiates — matching the
+        # behaviour of `curl --digest` (which doesn't cache across calls).
+        # The cost is one extra round-trip per call; for our use cases
+        # (10s coordinator poll + occasional probe) that's negligible.
+        if (
+            self._resp is not None
+            and self._resp.status != 401
+            and self._client._digest is not None
+        ):
+            self._client._digest.invalidate()
         if self._resp is not None and not self._resp.closed:
             self._resp.release()

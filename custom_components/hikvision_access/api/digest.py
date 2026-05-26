@@ -74,6 +74,20 @@ class DigestAuth:
     def has_challenge(self) -> bool:
         return self._nonce is not None
 
+    def invalidate(self) -> None:
+        """Drop the cached challenge so the next request re-negotiates.
+
+        Some Hikvision firmwares rotate the nonce per request or per TCP
+        connection. Reusing the cached challenge then 401s with no useful
+        ``WWW-Authenticate`` header. Forcing a fresh preflight per request
+        is slower but rock-solid against this quirk.
+        """
+        self._realm = None
+        self._nonce = None
+        self._qop = None
+        self._opaque = None
+        self._nc = 0
+
     def handle_challenge(self, www_authenticate: str) -> None:
         """Cache the parsed challenge and reset the nonce counter."""
         params = _parse_challenge(www_authenticate)
