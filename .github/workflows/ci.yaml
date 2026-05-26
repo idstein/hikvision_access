@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v3
+      - name: Install deps
+        run: uv pip install --system -e '.[dev]'
+      - name: Ruff
+        run: ruff check .
+      - name: Mypy (api/)
+        run: mypy custom_components/hikvision_access/api
+      - name: Pure-Python tests
+        run: PYTHONPATH=. pytest tests/ --ignore=tests/ha/ -v
+      - name: HA integration tests
+        run: PYTHONPATH=. pytest tests/ha/ -p homeassistant -v
+
+  hassfest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hacs/action@main
+        with:
+          category: integration
