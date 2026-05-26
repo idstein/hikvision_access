@@ -145,3 +145,62 @@ async def test_stream_dispatches_events(hass: HomeAssistant) -> None:
     # Event bus also fired:
     assert received_bus, "event bus did not receive the event"
     assert received_bus[0].data["name"] == "Alice"
+
+
+@pytest.mark.asyncio
+async def test_backfill_runs_on_startup(hass: HomeAssistant) -> None:
+    """Startup must call client.backfill() with a 24h window and dispatch results."""
+    from homeassistant.helpers.dispatcher import async_dispatcher_connect
+
+    from custom_components.hikvision_access.api.discovery import ReaderInfo
+    from custom_components.hikvision_access.const import SIGNAL_EVENT
+
+    entry = _build_entry()
+    entry.add_to_hass(hass)
+
+    backfill_calls: list[dict] = []
+
+    async def fake_backfill(start_time, end_time, already_seen=()):
+        backfill_calls.append({
+            "start_time": start_time, "end_time": end_time,
+            "already_seen": set(already_seen),
+        })
+        yield {
+            "device_id": None, "controller": "", "reader_no": 1, "reader_name": None,
+            "door_no": None, "card_no": "Y", "name": "Bob",
+            "minor_label": "card_swiped_valid", "serial_no": 42,
+            "timestamp": "2026-05-26T07:00:00Z", "backfilled": True,
+            "major": "event", "minor": 1, "employee_no": "",
+        }
+
+    received: list[dict] = []
+    async_dispatcher_connect(hass, SIGNAL_EVENT, lambda p: received.append(p))
+
+    with patch("custom_components.hikvision_access.HikAccessClient") as cls:
+        client = AsyncMock()
+        client.get_device_info = AsyncMock(
+            return_value={"serial_number": "serial-bf", "model": "M"}
+        )
+        client.probe_readers = AsyncMock(return_value=[
+            ReaderInfo(slot=1, enabled=True, name="Eingang", description=""),
+        ])
+        client.get_acs_work_status = AsyncMock(return_value={"AcsWorkStatus": {}})
+
+        async def empty_events():
+            if False:
+                yield  # pragma: no cover
+        client.events = MagicMock(return_value=empty_events())
+        client.backfill = MagicMock(side_effect=fake_backfill)
+        client.stop = AsyncMock()
+        cls.return_value = client
+
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert backfill_calls, "client.backfill was not invoked on startup"
+    call = backfill_calls[0]
+    # ISO8601 with timezone; end > start by exactly 24 hours (give or take ms).
+    assert call["start_time"].endswith("Z") or "+" in call["start_time"]
+    assert call["end_time"].endswith("Z") or "+" in call["end_time"]
+    # The backfilled event reaches the dispatcher with the backfilled flag preserved.
+    assert any(evt.get("backfilled") for evt in received)

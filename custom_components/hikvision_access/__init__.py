@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -19,6 +20,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.util import dt as dt_util
 
 from .api import HikAccessAuthError, HikAccessClient
 from .api.discovery import ReaderInfo
@@ -65,6 +67,51 @@ async def _run_stream(hass: HomeAssistant, entry: HikAccessConfigEntry) -> None:
         raise
     except Exception:  # noqa: BLE001
         _LOGGER.exception("Hikvision event stream task crashed; events will resume on next entry reload")
+
+
+async def _run_backfill(hass: HomeAssistant, entry: HikAccessConfigEntry) -> None:
+    """Replay AcsEvents the controller buffered while HA was down.
+
+    Reads ``last_serial_no`` from restored TotalSwipes sensor states to skip
+    already-ingested events. Queries the last 24h of AcsEvent history. Logged
+    at warning on failure — does NOT block setup.
+    """
+    data = entry.runtime_data
+    info = data.device_info
+    reader_index = {r.slot: r for r in data.readers}
+
+    # Collect already-seen serials from restored sensor attributes.
+    seen: set[int] = set()
+    for state in hass.states.async_all("sensor"):
+        if not state.entity_id.startswith("sensor.hikvision_"):
+            continue
+        if "total_swipes" not in state.entity_id:
+            continue
+        s = state.attributes.get("last_serial_no")
+        if isinstance(s, int):
+            seen.add(s)
+
+    end = dt_util.utcnow()
+    start = end - timedelta(hours=24)
+    iso = lambda dt: dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    try:
+        async for evt in data.client.backfill(
+            start_time=iso(start), end_time=iso(end), already_seen=seen
+        ):
+            evt["device_id"] = info.get("serial_number") or entry.unique_id or entry.entry_id
+            evt["controller"] = evt.get("controller") or info.get("device_name", "")
+            r = reader_index.get(evt.get("reader_no"))
+            if r is not None:
+                evt["reader_name"] = r.name
+                evt["door_no"] = (r.slot + 1) // 2
+            hass.bus.async_fire(EVENT_BUS_NAME, evt)
+            async_dispatcher_send(hass, SIGNAL_EVENT, evt)
+    except Exception:  # noqa: BLE001
+        _LOGGER.warning(
+            "AcsEvent backfill failed; HA will resume on the next live event",
+            exc_info=True,
+        )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: HikAccessConfigEntry) -> bool:
@@ -125,6 +172,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HikAccessConfigEntry) ->
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     entry.runtime_data.stream_task = hass.loop.create_task(_run_stream(hass, entry))
+
+    hass.async_create_task(_run_backfill(hass, entry))
     return True
 
 
