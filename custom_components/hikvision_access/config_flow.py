@@ -94,15 +94,16 @@ class HikAccessConfigFlow(ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
         """Return the options flow handler."""
-        return OptionsFlowHandler(config_entry)
+        return OptionsFlowHandler()
 
 
 class OptionsFlowHandler(OptionsFlow):
-    """Handle the options flow for the Hikvision Access integration."""
+    """Handle the options flow for the Hikvision Access integration.
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
+    Newer HA versions expose ``self.config_entry`` as a read-only property
+    that HA fills in itself before ``async_step_init`` runs, so we don't
+    accept or assign it in ``__init__``.
+    """
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
