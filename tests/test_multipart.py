@@ -29,3 +29,20 @@ async def test_overflow_raises_when_no_boundary_seen() -> None:
     with pytest.raises(MultipartBufferOverflow):
         async for _ in parser.feed(b"x" * 5000):
             pass
+
+
+@pytest.mark.asyncio
+async def test_parses_chunk_split_across_feeds(fixtures_dir) -> None:
+    data = (fixtures_dir / "single_chunk.bin").read_bytes()
+    parser = MultipartParser(boundary=b"MIME_boundary")
+
+    # Split the buffer at an arbitrary byte; both halves should still produce 1 chunk overall.
+    half = len(data) // 2
+    chunks = []
+    async for c in parser.feed(data[:half]):
+        chunks.append(c)
+    async for c in parser.feed(data[half:]):
+        chunks.append(c)
+
+    assert len(chunks) == 1
+    assert chunks[0]["eventType"] == "AccessControllerEvent"
