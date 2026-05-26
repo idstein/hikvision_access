@@ -160,3 +160,68 @@ async def test_last_event_sensor_ignores_other_readers(hass: HomeAssistant) -> N
     state = hass.states.get("sensor.hikvision_eingang_last_event")
     assert state.state in ("unknown", "")
     assert state.attributes.get("card_no") != "Z"
+
+
+@pytest.mark.asyncio
+async def test_total_swipes_increments_on_each_card_event(hass: HomeAssistant) -> None:
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_HOST: "h", CONF_PORT: 443, CONF_SSL: True, CONF_VERIFY_SSL: False,
+            CONF_USERNAME: "admin", CONF_PASSWORD: "pw",
+        },
+        unique_id="serial-swipes",
+    )
+    entry.add_to_hass(hass)
+
+    with patch("custom_components.hikvision_access.HikAccessClient") as cls:
+        client = AsyncMock()
+        client.get_device_info = AsyncMock(
+            return_value={"serial_number": "serial-swipes", "model": "M"}
+        )
+        client.probe_readers = AsyncMock(return_value=[
+            ReaderInfo(slot=1, enabled=True, name="Eingang", description=""),
+        ])
+        client.get_acs_work_status = AsyncMock(return_value={"AcsWorkStatus": {}})
+
+        async def empty():
+            if False:
+                yield  # pragma: no cover
+        client.events = MagicMock(return_value=empty())
+        client.stop = AsyncMock()
+        cls.return_value = client
+
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    # Dispatch 3 card events; counter should land at 3.
+    for serial in (1, 2, 3):
+        async_dispatcher_send(
+            hass, SIGNAL_EVENT,
+            {
+                "controller": "C", "reader_no": 1, "reader_name": "Eingang",
+                "door_no": 1, "card_no": f"card{serial}", "name": "x",
+                "minor_label": "card_swiped_valid", "serial_no": serial,
+                "timestamp": "t", "backfilled": False, "major": "event",
+                "minor": 1, "employee_no": "",
+            },
+        )
+        await hass.async_block_till_done()
+
+    state = hass.states.get("sensor.hikvision_eingang_total_swipes")
+    assert state is not None
+    assert int(float(state.state)) == 3
+
+    # An event without a card_no (denial, etc) must NOT count.
+    async_dispatcher_send(
+        hass, SIGNAL_EVENT,
+        {
+            "controller": "C", "reader_no": 1, "reader_name": "Eingang",
+            "door_no": 1, "card_no": "", "name": "", "minor_label": "card_authentication_failed",
+            "serial_no": 4, "timestamp": "t", "backfilled": False,
+            "major": "event", "minor": 12, "employee_no": "",
+        },
+    )
+    await hass.async_block_till_done()
+    state = hass.states.get("sensor.hikvision_eingang_total_swipes")
+    assert int(float(state.state)) == 3
