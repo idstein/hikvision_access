@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
@@ -9,7 +10,9 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.event import async_track_time_change
 from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.util import dt as dt_util
 
 from . import HikAccessConfigEntry
 from .const import DOMAIN, SIGNAL_EVENT
@@ -38,6 +41,7 @@ async def async_setup_entry(
         if r.enabled:
             entities.append(LastEventSensor(entry, reader_slot=r.slot, reader_name=r.name))
             entities.append(TotalSwipesSensor(entry, reader_slot=r.slot, reader_name=r.name))
+            entities.append(UniqueVisitorsTodaySensor(entry, reader_slot=r.slot, reader_name=r.name))
     async_add_entities(entities)
 
 
@@ -138,4 +142,96 @@ class TotalSwipesSensor(RestoreEntity, SensorEntity):
         if not payload.get("card_no"):
             return
         self._count += 1
+        self.async_write_ha_state()
+
+
+class UniqueVisitorsTodaySensor(RestoreEntity, SensorEntity):
+    """Count of distinct cardholders seen today (resets at local midnight).
+
+    Backing store is a Python set of ``card_no`` values; size is the state.
+    The set + names are serialized into entity-state attributes
+    (``card_set`` + ``cardholders``) so a same-day HA restart restores them
+    via RestoreEntity. Capped at 5000 entries to prevent unbounded growth
+    in pathological scenarios.
+    """
+
+    MAX_CARDS = 5000
+
+    _attr_has_entity_name = False
+    _attr_should_poll = False
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self, entry: HikAccessConfigEntry, reader_slot: int, reader_name: str
+    ) -> None:
+        self._entry = entry
+        self._reader_slot = reader_slot
+        slug = _slug(reader_name, reader_slot)
+        self._attr_unique_id = (
+            f"{entry.unique_id}_reader_{reader_slot}_unique_today"
+        )
+        self._attr_name = (
+            f"Hikvision {reader_name or f'Reader {reader_slot}'} Unique Visitors Today"
+        )
+        self.entity_id = f"sensor.hikvision_{slug}_unique_visitors_today"
+        self._cards: set[str] = set()
+        self._names: set[str] = set()
+        self._last_reset = dt_util.start_of_local_day()
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.unique_id or entry.entry_id)},
+        )
+
+    @property
+    def native_value(self) -> int:
+        return len(self._cards)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "cardholders": sorted(self._names),
+            "card_set": sorted(self._cards),
+            "last_reset": self._last_reset.isoformat(),
+        }
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        today = dt_util.start_of_local_day()
+        last = await self.async_get_last_state()
+        if last is not None and last.attributes.get("last_reset"):
+            try:
+                lr = dt_util.parse_datetime(last.attributes["last_reset"])
+            except (TypeError, ValueError):
+                lr = today
+            if lr is not None and lr == today:
+                self._last_reset = lr
+                self._cards = set(last.attributes.get("card_set") or [])
+                self._names = set(last.attributes.get("cardholders") or [])
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, SIGNAL_EVENT, self._on_event)
+        )
+        self.async_on_remove(
+            async_track_time_change(
+                self.hass, self._reset_at_midnight, hour=0, minute=0, second=0
+            )
+        )
+
+    @callback
+    def _on_event(self, payload: dict[str, Any]) -> None:
+        if payload.get("reader_no") != self._reader_slot:
+            return
+        card = payload.get("card_no")
+        if not card:
+            return
+        if len(self._cards) >= self.MAX_CARDS:
+            return
+        self._cards.add(card)
+        if payload.get("name"):
+            self._names.add(payload["name"])
+        self.async_write_ha_state()
+
+    @callback
+    def _reset_at_midnight(self, _now: datetime) -> None:
+        self._cards.clear()
+        self._names.clear()
+        self._last_reset = dt_util.start_of_local_day()
         self.async_write_ha_state()
