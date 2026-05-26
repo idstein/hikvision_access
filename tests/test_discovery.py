@@ -42,3 +42,38 @@ def test_parse_acs_work_status(fixtures_dir: Path) -> None:
     assert status.door_open == [False, False]
     assert status.reader_online == [True]
     assert status.tamper is False
+
+
+def test_parse_card_reader_cfg_returns_none_on_notsupport(fixtures_dir: Path) -> None:
+    raw = json.loads((fixtures_dir / "card_reader_notsupport.json").read_text())
+    assert parse_card_reader_cfg(slot=5, raw=raw) is None
+
+
+def test_parse_card_reader_cfg_returns_none_on_empty_or_garbage() -> None:
+    assert parse_card_reader_cfg(slot=1, raw={}) is None
+    assert parse_card_reader_cfg(slot=1, raw={"CardReaderCfg": "not-a-dict"}) is None
+
+
+def test_parse_acs_work_status_tolerates_non_int_door_state() -> None:
+    raw = {
+        "AcsWorkStatus": {
+            "doorLockStatus": [0, 0],
+            "magneticStatus": [0, 0],
+            "doorStatus": [4, "garbage"],
+            "cardReaderOnlineStatus": [1],
+            "hostAntiDismantleStatus": "close",
+            "powerSupplyStatus": "ACPowerSupply",
+        }
+    }
+    status = parse_acs_work_status(raw, door_count=2, reader_count=1)
+    assert status.door_state == [4, -1]
+    assert status.reader_online == [True]
+
+
+def test_parse_acs_work_status_pads_short_arrays() -> None:
+    raw = {"AcsWorkStatus": {}}
+    status = parse_acs_work_status(raw, door_count=2, reader_count=1)
+    assert status.door_lock == [False, False]
+    assert status.door_open == [False, False]
+    assert status.door_state == [-1, -1]
+    assert status.reader_online == [False]
