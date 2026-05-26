@@ -127,8 +127,7 @@ class HikAccessClient:
         from .http import fetch_device_info
         return await fetch_device_info(self._session, self._base_url, self._auth)
 
-    async def probe_readers(self, max_slots: int = 8) -> list["ReaderInfo"]:
-        from .discovery import ReaderInfo  # noqa: F401
+    async def probe_readers(self, max_slots: int = 8) -> list[ReaderInfo]:
         from .http import probe_card_readers
         return await probe_card_readers(self._session, self._base_url, self._auth, max_slots)
 
