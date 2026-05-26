@@ -46,3 +46,12 @@ async def test_parses_chunk_split_across_feeds(fixtures_dir) -> None:
 
     assert len(chunks) == 1
     assert chunks[0]["eventType"] == "AccessControllerEvent"
+
+
+@pytest.mark.asyncio
+async def test_skips_non_json_body(fixtures_dir) -> None:
+    data = (fixtures_dir / "mixed_good_bad.bin").read_bytes()
+    parser = MultipartParser(boundary=b"MIME_boundary")
+
+    chunks = [c async for c in parser.feed(data)]
+    assert chunks == [{"eventType": "ok"}]

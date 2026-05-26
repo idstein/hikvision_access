@@ -1,0 +1,11 @@
+--MIME_boundary
+Content-Type: application/xml
+Content-Length: 11
+
+<not-json/>
+--MIME_boundary
+Content-Type: application/json
+Content-Length: 18
+
+{"eventType":"ok"}
+--MIME_boundary
