@@ -177,7 +177,11 @@ async def test_backfill_runs_on_startup(hass: HomeAssistant) -> None:
     received: list[dict] = []
     async_dispatcher_connect(hass, SIGNAL_EVENT, lambda p: received.append(p))
 
-    with patch("custom_components.hikvision_access.HikAccessClient") as cls:
+    with patch(
+        "custom_components.hikvision_access.HikAccessClient"
+    ) as cls, patch(
+        "custom_components.hikvision_access.async_import_statistics"
+    ):
         client = AsyncMock()
         client.get_device_info = AsyncMock(
             return_value={"serial_number": "serial-bf", "model": "M"}
