@@ -1,0 +1,6 @@
+--MIME_boundary
+Content-Type: application/json; charset="UTF-8"
+Content-Length: 99
+
+{"eventType":"AccessControllerEvent","AccessControllerEvent":{"deviceName":"x","majorEventType":3}}
+--MIME_boundary
