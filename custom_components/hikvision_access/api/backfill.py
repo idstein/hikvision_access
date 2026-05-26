@@ -94,6 +94,13 @@ async def fetch_pages(
                 "searchID": search_id,
                 "searchResultPosition": position,
                 "maxResults": page_size,
+                # major=0 covers alarm events. Without an explicit major filter
+                # some Hikvision firmwares 400; sending it as an int is the
+                # documented contract from the device's own AcsEvent capabilities
+                # response (``@opt: "0,1,2,3,5"``). We chase events with this
+                # major plus the per-major minor=0 wildcard for "any sub-type".
+                "major": 0,
+                "minor": 0,
                 "startTime": start_time,
                 "endTime": end_time,
             }
@@ -103,7 +110,16 @@ async def fetch_pages(
             f"{base}/ISAPI/AccessControl/AcsEvent?format=json",
             json=body,
         ) as r:
-            r.raise_for_status()
+            if r.status >= 400:
+                # Pull a snippet of the error body so the warning log carries
+                # enough context to diagnose firmware-specific schema gripes
+                # without a full traffic capture.
+                body_preview = await r.text()
+                _LOGGER.warning(
+                    "AcsEvent search returned %d; body=%s; request=%r",
+                    r.status, body_preview[:500], body,
+                )
+                r.raise_for_status()  # surface so the caller can choose to abort
             page = await r.json(content_type=None)
         info_list = page.get("AcsEvent", {}).get("InfoList", [])
         if not info_list:

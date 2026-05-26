@@ -122,7 +122,10 @@ async def _run_backfill(hass: HomeAssistant, entry: HikAccessConfigEntry) -> Non
     start = end - timedelta(days=int(backfill_days))
 
     def iso(dt: datetime) -> str:
-        return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
+        # Keep the explicit ``+00:00`` offset — Hikvision firmware on some
+        # controllers (e.g. DS-K2702WX V1.7.4) 400 the search request when
+        # the time uses the ``Z`` Zulu shorthand.
+        return dt.isoformat(timespec="seconds")
 
     # slot -> list of UTC datetimes for events the device replayed
     replayed_per_slot: dict[int, list[datetime]] = defaultdict(list)
