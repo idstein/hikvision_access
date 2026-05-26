@@ -110,3 +110,53 @@ async def test_no_sensor_created_for_disabled_reader(hass: HomeAssistant) -> Non
     # Reader 2's slug-from-empty-name pattern shouldn't accidentally create entities either.
     matching = [s for s in hass.states.async_all() if "last_event" in s.entity_id]
     assert matching == []
+
+
+@pytest.mark.asyncio
+async def test_last_event_sensor_ignores_other_readers(hass: HomeAssistant) -> None:
+    """An event for reader_no=2 must not update the slot-1 sensor."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_HOST: "h", CONF_PORT: 443, CONF_SSL: True, CONF_VERIFY_SSL: False,
+            CONF_USERNAME: "admin", CONF_PASSWORD: "pw",
+        },
+        unique_id="serial-sensor3",
+    )
+    entry.add_to_hass(hass)
+
+    with patch("custom_components.hikvision_access.HikAccessClient") as cls:
+        client = AsyncMock()
+        client.get_device_info = AsyncMock(
+            return_value={"serial_number": "serial-sensor3", "model": "M"}
+        )
+        client.probe_readers = AsyncMock(return_value=[
+            ReaderInfo(slot=1, enabled=True, name="Eingang", description=""),
+        ])
+        client.get_acs_work_status = AsyncMock(return_value={"AcsWorkStatus": {}})
+
+        async def empty():
+            if False:
+                yield  # pragma: no cover
+        client.events = MagicMock(return_value=empty())
+        client.stop = AsyncMock()
+        cls.return_value = client
+
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    async_dispatcher_send(
+        hass,
+        SIGNAL_EVENT,
+        {
+            "controller": "C", "reader_no": 2, "reader_name": "Exit", "door_no": 1,
+            "card_no": "Z", "name": "Bob", "minor_label": "card_swiped_valid",
+            "serial_no": 99, "timestamp": "t", "backfilled": False,
+            "major": "event", "minor": 1, "employee_no": "",
+        },
+    )
+    await hass.async_block_till_done()
+
+    state = hass.states.get("sensor.hikvision_eingang_last_event")
+    assert state.state in ("unknown", "")
+    assert state.attributes.get("card_no") != "Z"
