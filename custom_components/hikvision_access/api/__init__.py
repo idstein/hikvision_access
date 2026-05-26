@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Iterable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
 from .transport import AlertStreamTransport
+
+if TYPE_CHECKING:
+    from .discovery import ReaderInfo
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -124,11 +127,12 @@ class HikAccessClient:
         from .http import fetch_device_info
         return await fetch_device_info(self._session, self._base_url, self._auth)
 
-    async def probe_readers(self, max_slots: int = 8):
+    async def probe_readers(self, max_slots: int = 8) -> list["ReaderInfo"]:
+        from .discovery import ReaderInfo  # noqa: F401
         from .http import probe_card_readers
         return await probe_card_readers(self._session, self._base_url, self._auth, max_slots)
 
-    async def get_acs_work_status(self):
+    async def get_acs_work_status(self) -> dict[str, Any]:
         from .http import fetch_acs_work_status
         return await fetch_acs_work_status(self._session, self._base_url, self._auth)
 

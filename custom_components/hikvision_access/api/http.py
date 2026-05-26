@@ -85,4 +85,5 @@ async def fetch_acs_work_status(
     ) as r:
         r.raise_for_status()
         # content_type=None: see probe_card_readers note above.
-        return await r.json(content_type=None)
+        data: dict[str, Any] = await r.json(content_type=None)
+        return data

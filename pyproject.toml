@@ -13,7 +13,7 @@ dev = [
   "pytest-homeassistant-custom-component>=0.13",
   "aiohttp>=3.9",
   "ruff>=0.5",
-  "mypy>=1.10",
+  "mypy>=1.16",
 ]
 
 [tool.ruff]
@@ -27,6 +27,10 @@ select = ["E", "F", "W", "I", "B", "BLE", "UP", "ASYNC", "PT", "SIM", "RUF"]
 python_version = "3.12"
 strict = true
 files = ["custom_components/hikvision_access/api"]
+# Don't chase imports beyond the api/ package — HA core's typings have
+# their own issues we shouldn't fight here. Strict-check our pure-Python
+# core; leave HA-side entities to runtime tests.
+follow_imports = "silent"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

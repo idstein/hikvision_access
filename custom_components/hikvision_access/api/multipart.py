@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from typing import Any
 
 
 class MultipartBufferOverflow(RuntimeError):
@@ -26,7 +27,7 @@ class MultipartParser:
         self._buf = b""
         self._max_buffer = max_buffer if max_buffer is not None else self.DEFAULT_MAX_BUFFER
 
-    async def feed(self, data: bytes) -> AsyncIterator[dict]:
+    async def feed(self, data: bytes) -> AsyncIterator[dict[str, Any]]:
         self._buf += data
         if len(self._buf) > self._max_buffer:
             raise MultipartBufferOverflow(

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Iterable, Iterator
+from collections.abc import AsyncIterator, Iterable, Iterator
 from typing import Any
 
 import aiohttp
@@ -74,7 +74,7 @@ async def fetch_pages(
     start_time: str,
     end_time: str,
     page_size: int = 30,
-):
+) -> AsyncIterator[dict[str, Any]]:
     """Yield raw AcsEvent pages until the device returns an empty InfoList.
 
     Notes:
