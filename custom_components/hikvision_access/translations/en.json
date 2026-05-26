@@ -17,5 +17,13 @@
       "cannot_connect": "Cannot connect"
     },
     "abort": { "already_configured": "Device already configured" }
+  },
+  "device_automation": {
+    "trigger_type": {
+      "card_read": "Card read at any reader",
+      "card_denied": "Card read denied (any reason)",
+      "door_forced": "Door forced open",
+      "door_held_open": "Door held open"
+    }
   }
 }

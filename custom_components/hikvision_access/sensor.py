@@ -85,7 +85,15 @@ class LastEventSensor(SensorEntity):
         self._attr_native_value = (
             payload.get("name") or payload.get("card_no") or "unknown"
         )
-        self._attr_extra_state_attributes = dict(payload)
+        # Persist a redacted copy of the payload as state attributes.
+        # The raw card_no is PII and would otherwise land in HA's recorder DB
+        # + REST/WS APIs; the bus event still carries the full payload for
+        # automations that need it.
+        attrs = dict(payload)
+        if attrs.get("card_no"):
+            attrs["card_no_last4"] = f"****{attrs['card_no'][-4:]}"
+        attrs.pop("card_no", None)
+        self._attr_extra_state_attributes = attrs
         self.async_write_ha_state()
 
 

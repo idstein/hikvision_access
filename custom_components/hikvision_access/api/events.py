@@ -53,10 +53,19 @@ def normalize_event(raw: dict[str, Any]) -> dict[str, Any] | None:
     except (TypeError, ValueError):
         return None
 
+    # cardReaderNo can come back as a JSON string on some firmware revisions.
+    # Coerce so downstream consumers (entities, dispatcher matchers) always
+    # compare ints; otherwise events silently route to the wrong reader.
+    raw_reader = ace.get("cardReaderNo")
+    try:
+        reader_no = int(raw_reader) if raw_reader not in (None, "") else None
+    except (TypeError, ValueError):
+        reader_no = None
+
     return {
         "device_id": None,  # filled in by client (needs deviceInfo serial)
         "controller": ace.get("deviceName", ""),
-        "reader_no": ace.get("cardReaderNo"),
+        "reader_no": reader_no,
         "reader_name": None,  # filled by client via discovery cache
         "door_no": None,  # filled by client via reader→door map
         "card_no": ace.get("cardNo", ""),

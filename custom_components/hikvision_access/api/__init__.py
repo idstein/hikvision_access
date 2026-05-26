@@ -52,7 +52,15 @@ class HikAccessClient:
         self._auth = aiohttp.BasicAuth(username, password) if username else None
         scheme = "https" if ssl else "http"
         self._base_url = f"{scheme}://{host}:{port}"
-        connector = aiohttp.TCPConnector(ssl=verify_ssl)
+        # ssl=False disables verification; verify_ssl=True needs an explicit
+        # SSLContext so we get real cert checking, not aiohttp's default behaviour.
+        if verify_ssl:
+            import ssl as _ssl
+
+            ssl_ctx: _ssl.SSLContext | bool = _ssl.create_default_context()
+        else:
+            ssl_ctx = False
+        connector = aiohttp.TCPConnector(ssl=ssl_ctx)
         self._session = aiohttp.ClientSession(connector=connector)
         self._transport: AlertStreamTransport | None = None
         self._stop = asyncio.Event()

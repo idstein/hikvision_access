@@ -43,10 +43,16 @@ def replay_page(page: dict[str, Any], already_seen: Iterable[int] = ()) -> Itera
                 "replay_page: dropping item with non-coercible major/minor: serial=%r", serial
             )
             continue
+        # Coerce cardReaderNo so it always matches the int slot used by entities.
+        raw_reader = item.get("cardReaderNo")
+        try:
+            reader_no = int(raw_reader) if raw_reader not in (None, "") else None
+        except (TypeError, ValueError):
+            reader_no = None
         yield {
             "device_id": None,
             "controller": "",
-            "reader_no": item.get("cardReaderNo"),
+            "reader_no": reader_no,
             "reader_name": None,
             "door_no": None,
             "card_no": item.get("cardNo", ""),
