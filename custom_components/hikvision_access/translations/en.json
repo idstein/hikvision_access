@@ -8,7 +8,8 @@
           "ssl": "Use HTTPS",
           "verify_ssl": "Verify SSL certificate",
           "username": "Username",
-          "password": "Password"
+          "password": "Password",
+          "backfill_days": "Backfill window (days)"
         }
       }
     },
@@ -17,6 +18,16 @@
       "cannot_connect": "Cannot connect"
     },
     "abort": { "already_configured": "Device already configured" }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "backfill_days": "Backfill window (days)"
+        },
+        "description": "How many days of past AcsEvent history to import on startup. Set to 0 to disable backfill entirely."
+      }
+    }
   },
   "device_automation": {
     "trigger_type": {

@@ -265,3 +265,120 @@ async def test_backfill_imports_hourly_statistics(hass: HomeAssistant) -> None:
     # Running sums: 2 events in 08:00 bucket, +1 in 09:00 → 2, 3.
     sums = [row["sum"] for row in stats]
     assert sums == [2, 3]
+
+
+def _parse_iso_window(start_time: str, end_time: str) -> "timedelta":
+    """Parse an ISO8601 backfill window into a timedelta."""
+    from datetime import datetime, timedelta  # noqa: F401
+
+    # The integration emits both `...Z` and `...+00:00` flavors; normalize.
+    def _norm(s: str) -> str:
+        return s.replace("Z", "+00:00")
+
+    start = datetime.fromisoformat(_norm(start_time))
+    end = datetime.fromisoformat(_norm(end_time))
+    return end - start
+
+
+@pytest.mark.asyncio
+async def test_backfill_uses_default_30_day_window(hass: HomeAssistant) -> None:
+    """Without options or explicit data, _run_backfill must request 30 days."""
+    from datetime import timedelta
+
+    from custom_components.hikvision_access.api.discovery import ReaderInfo
+
+    entry = _build_entry()
+    entry.add_to_hass(hass)
+
+    backfill_calls: list[dict] = []
+
+    async def fake_backfill(start_time, end_time, already_seen=()):
+        backfill_calls.append({"start_time": start_time, "end_time": end_time})
+        if False:
+            yield  # pragma: no cover
+
+    with patch("custom_components.hikvision_access.HikAccessClient") as cls:
+        client = AsyncMock()
+        client.get_device_info = AsyncMock(
+            return_value={"serial_number": "serial-30d", "model": "M"}
+        )
+        client.probe_readers = AsyncMock(return_value=[
+            ReaderInfo(slot=1, enabled=True, name="Eingang", description=""),
+        ])
+        client.get_acs_work_status = AsyncMock(return_value={"AcsWorkStatus": {}})
+
+        async def empty_events():
+            if False:
+                yield  # pragma: no cover
+        client.events = MagicMock(return_value=empty_events())
+        client.backfill = MagicMock(side_effect=fake_backfill)
+        client.stop = AsyncMock()
+        cls.return_value = client
+
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert backfill_calls
+    delta = _parse_iso_window(
+        backfill_calls[0]["start_time"], backfill_calls[0]["end_time"]
+    )
+    # Allow a small fudge for execution time between utcnow() calls.
+    assert timedelta(days=30) - timedelta(seconds=5) <= delta <= timedelta(days=30) + timedelta(seconds=5)
+
+
+@pytest.mark.asyncio
+async def test_backfill_respects_options_override(hass: HomeAssistant) -> None:
+    """When entry.options sets CONF_BACKFILL_DAYS, the window must shrink to match."""
+    from datetime import timedelta
+
+    from custom_components.hikvision_access.api.discovery import ReaderInfo
+    from custom_components.hikvision_access.const import CONF_BACKFILL_DAYS
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_HOST: "h",
+            CONF_PORT: 443,
+            CONF_SSL: True,
+            CONF_VERIFY_SSL: False,
+            CONF_USERNAME: "admin",
+            CONF_PASSWORD: "pw",
+        },
+        options={CONF_BACKFILL_DAYS: 7},
+        unique_id="serial-7d",
+    )
+    entry.add_to_hass(hass)
+
+    backfill_calls: list[dict] = []
+
+    async def fake_backfill(start_time, end_time, already_seen=()):
+        backfill_calls.append({"start_time": start_time, "end_time": end_time})
+        if False:
+            yield  # pragma: no cover
+
+    with patch("custom_components.hikvision_access.HikAccessClient") as cls:
+        client = AsyncMock()
+        client.get_device_info = AsyncMock(
+            return_value={"serial_number": "serial-7d", "model": "M"}
+        )
+        client.probe_readers = AsyncMock(return_value=[
+            ReaderInfo(slot=1, enabled=True, name="Eingang", description=""),
+        ])
+        client.get_acs_work_status = AsyncMock(return_value={"AcsWorkStatus": {}})
+
+        async def empty_events():
+            if False:
+                yield  # pragma: no cover
+        client.events = MagicMock(return_value=empty_events())
+        client.backfill = MagicMock(side_effect=fake_backfill)
+        client.stop = AsyncMock()
+        cls.return_value = client
+
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert backfill_calls
+    delta = _parse_iso_window(
+        backfill_calls[0]["start_time"], backfill_calls[0]["end_time"]
+    )
+    assert timedelta(days=7) - timedelta(seconds=5) <= delta <= timedelta(days=7) + timedelta(seconds=5)

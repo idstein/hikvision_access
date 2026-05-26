@@ -8,6 +8,10 @@ DEFAULT_PORT = 443
 DEFAULT_VERIFY_SSL = False
 
 CONF_VERIFY_SSL = "verify_ssl"
+CONF_BACKFILL_DAYS = "backfill_days"
+DEFAULT_BACKFILL_DAYS = 30
+BACKFILL_DAYS_MIN = 0     # 0 means "no backfill" (just live stream)
+BACKFILL_DAYS_MAX = 365   # device-side buffer will usually run out long before this
 
 SIGNAL_EVENT = f"{DOMAIN}_event"
 EVENT_BUS_NAME = f"{DOMAIN}_event"

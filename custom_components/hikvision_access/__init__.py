@@ -30,7 +30,14 @@ from homeassistant.util import dt as dt_util
 
 from .api import HikAccessAuthError, HikAccessClient
 from .api.discovery import ReaderInfo
-from .const import CONF_VERIFY_SSL, DOMAIN, EVENT_BUS_NAME, SIGNAL_EVENT
+from .const import (
+    CONF_BACKFILL_DAYS,
+    CONF_VERIFY_SSL,
+    DEFAULT_BACKFILL_DAYS,
+    DOMAIN,
+    EVENT_BUS_NAME,
+    SIGNAL_EVENT,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -79,12 +86,22 @@ async def _run_backfill(hass: HomeAssistant, entry: HikAccessConfigEntry) -> Non
     """Replay AcsEvents the controller buffered while HA was down.
 
     Reads ``last_serial_no`` from restored TotalSwipes sensor states to skip
-    already-ingested events. Queries the last 24h of AcsEvent history. Logged
-    at warning on failure — does NOT block setup.
+    already-ingested events. Window size is controlled by the
+    ``backfill_days`` option (default 30 days). Setting it to 0 disables
+    backfill entirely. Logged at warning on failure — does NOT block setup.
     """
     data = entry.runtime_data
     info = data.device_info
     reader_index = {r.slot: r for r in data.readers}
+
+    backfill_days = (
+        entry.options.get(CONF_BACKFILL_DAYS)
+        or entry.data.get(CONF_BACKFILL_DAYS)
+        or DEFAULT_BACKFILL_DAYS
+    )
+    if backfill_days <= 0:
+        _LOGGER.debug("backfill disabled by configuration; skipping")
+        return
 
     # Collect already-seen serials from restored sensor attributes.
     seen: set[int] = set()
@@ -98,7 +115,7 @@ async def _run_backfill(hass: HomeAssistant, entry: HikAccessConfigEntry) -> Non
             seen.add(s)
 
     end = dt_util.utcnow()
-    start = end - timedelta(hours=24)
+    start = end - timedelta(days=int(backfill_days))
     iso = lambda dt: dt.isoformat(timespec="seconds").replace("+00:00", "Z")
 
     # slot -> list of UTC datetimes for events the device replayed
@@ -218,7 +235,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HikAccessConfigEntry) ->
     entry.runtime_data.stream_task = hass.loop.create_task(_run_stream(hass, entry))
 
     hass.async_create_task(_run_backfill(hass, entry))
+
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
+
+
+async def _async_update_listener(
+    hass: HomeAssistant, entry: HikAccessConfigEntry
+) -> None:
+    """Reload the entry when options change so the new backfill window applies."""
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: HikAccessConfigEntry) -> bool:

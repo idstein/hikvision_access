@@ -104,6 +104,69 @@ async def test_user_flow_cannot_connect(hass: HomeAssistant) -> None:
 
 
 @pytest.mark.asyncio
+async def test_options_flow_updates_backfill_days(hass: HomeAssistant) -> None:
+    """The options flow should let the user change backfill_days post-setup."""
+    from unittest.mock import MagicMock
+
+    from custom_components.hikvision_access.const import (
+        CONF_BACKFILL_DAYS,
+        DEFAULT_BACKFILL_DAYS,
+    )
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="serial-opts",
+        data={
+            CONF_HOST: "h",
+            CONF_PORT: 443,
+            CONF_SSL: True,
+            CONF_VERIFY_SSL: False,
+            CONF_USERNAME: "admin",
+            CONF_PASSWORD: "pw",
+            CONF_BACKFILL_DAYS: DEFAULT_BACKFILL_DAYS,
+        },
+    )
+    entry.add_to_hass(hass)
+
+    with patch("custom_components.hikvision_access.HikAccessClient") as setup_cls:
+        client = AsyncMock()
+        client.get_device_info = AsyncMock(
+            return_value={"serial_number": "serial-opts", "model": "M"}
+        )
+        client.probe_readers = AsyncMock(return_value=[])
+        client.get_acs_work_status = AsyncMock(return_value={"AcsWorkStatus": {}})
+
+        async def empty_events():
+            if False:
+                yield  # pragma: no cover
+
+        async def empty_backfill(start_time, end_time, already_seen=()):
+            if False:
+                yield  # pragma: no cover
+
+        client.events = MagicMock(return_value=empty_events())
+        client.backfill = MagicMock(side_effect=empty_backfill)
+        client.stop = AsyncMock()
+        setup_cls.return_value = client
+
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+        # Now drive the options flow.
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        assert result["type"] == "form"
+        assert result["step_id"] == "init"
+
+        result2 = await hass.config_entries.options.async_configure(
+            result["flow_id"], {CONF_BACKFILL_DAYS: 7}
+        )
+        assert result2["type"] == "create_entry"
+        await hass.async_block_till_done()
+
+        assert entry.options[CONF_BACKFILL_DAYS] == 7
+
+
+@pytest.mark.asyncio
 async def test_user_flow_aborts_when_already_configured(hass: HomeAssistant) -> None:
     """Adding a device with a serial already known must abort the flow."""
     existing = MockConfigEntry(
