@@ -1,0 +1,1 @@
+{"AcsEvent": {"totalMatches": 2, "responseStatusStrg": "OK", "numOfMatches": 2, "InfoList": [{"time": "2026-05-26T08:00:00+02:00", "serialNo": 100, "major": 3, "minor": 1, "cardNo": "A", "name": "Alice", "cardReaderNo": 1}, {"time": "2026-05-26T08:01:00+02:00", "serialNo": 101, "major": 3, "minor": 1, "cardNo": "B", "name": "Bob", "cardReaderNo": 1}]}}
