@@ -25,9 +25,7 @@ from .const import CONF_VERIFY_SSL, DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-# Platforms are added in later tasks; keep empty for now so async_setup_entry
-# can be exercised without sensor.py / binary_sensor.py existing yet.
-PLATFORMS: list[Platform] = []
+PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 
 @dataclass
