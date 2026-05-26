@@ -18,7 +18,15 @@ jobs:
           python-version: ${{ matrix.python }}
       - uses: astral-sh/setup-uv@v3
       - name: Install deps
-        run: uv pip install --system -e '.[dev]'
+        # Install dev tools and HA test framework, but NOT the integration
+        # itself as editable — uv's editable shim leaves a stale path-hook
+        # file behind that `enable_custom_integrations` fails to discover.
+        # `PYTHONPATH=.` in the test steps handles importing our code.
+        run: |
+          uv pip install --system \
+            pytest pytest-asyncio pytest-aiohttp \
+            pytest-homeassistant-custom-component \
+            aiohttp 'ruff' 'mypy>=1.16'
       - name: Ruff
         run: ruff check .
       - name: Mypy (api/)
