@@ -24,13 +24,13 @@ target-version = "py312"
 select = ["E", "F", "W", "I", "B", "BLE", "UP", "ASYNC", "PT", "SIM", "RUF"]
 
 [tool.mypy]
-python_version = "3.12"
 strict = true
 files = ["custom_components/hikvision_access/api"]
-# Don't chase imports beyond the api/ package — HA core's typings have
-# their own issues we shouldn't fight here. Strict-check our pure-Python
-# core; leave HA-side entities to runtime tests.
-follow_imports = "silent"
+# Skip analyzing imports entirely — HA core uses PEP 696 type-parameter
+# defaults (Python 3.13+ syntax) which mypy's parser rejects when the
+# project's python_version is lower. We strict-check only the pure-Python
+# api/ core; everything outside is left to runtime tests.
+follow_imports = "skip"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
