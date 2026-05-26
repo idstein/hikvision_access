@@ -13,6 +13,19 @@ from .transport import AlertStreamTransport
 _LOGGER = logging.getLogger(__name__)
 
 
+class HikAccessError(Exception):
+    """Base class for domain errors from the Hikvision ISAPI client."""
+
+
+class HikAccessAuthError(HikAccessError):
+    """Raised when the controller rejects credentials (HTTP 401).
+
+    Distinct from ``PermissionError`` (which carries OS-level EACCES
+    semantics) so HA's ``except OSError`` handlers don't accidentally
+    swallow auth failures.
+    """
+
+
 class HikAccessClient:
     """Single-controller ISAPI client."""
 
@@ -30,7 +43,7 @@ class HikAccessClient:
         self._auth = aiohttp.BasicAuth(username, password) if username else None
         scheme = "https" if ssl else "http"
         self._base_url = f"{scheme}://{host}:{port}"
-        connector = aiohttp.TCPConnector(ssl=False if not verify_ssl else None)
+        connector = aiohttp.TCPConnector(ssl=verify_ssl)
         self._session = aiohttp.ClientSession(connector=connector)
         self._transport: AlertStreamTransport | None = None
 

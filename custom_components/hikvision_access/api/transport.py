@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
 from .events import normalize_event
 from .multipart import MultipartParser
+
+if TYPE_CHECKING:
+    pass
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -33,10 +36,13 @@ class AlertStreamTransport:
         self._stop.set()
 
     async def stream(self) -> AsyncIterator[dict[str, Any]]:
+        # Lazy import avoids a circular dependency with the client module.
+        from . import HikAccessAuthError
+
         parser = MultipartParser(boundary=b"MIME_boundary")
         async with self._session.get(self._url, auth=self._auth) as resp:
             if resp.status == 401:
-                raise PermissionError("alertStream returned 401")
+                raise HikAccessAuthError("alertStream returned 401")
             resp.raise_for_status()
             async for raw in resp.content.iter_any():
                 if self._stop.is_set():

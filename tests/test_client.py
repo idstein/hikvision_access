@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from aiohttp import web
 
-from custom_components.hikvision_access.api import HikAccessClient
+from custom_components.hikvision_access.api import HikAccessAuthError, HikAccessClient
 
 
 async def _alertstream_handler(request: web.Request) -> web.StreamResponse:
@@ -39,7 +39,7 @@ async def test_client_streams_one_event(aiohttp_server) -> None:
     received: list[dict[str, Any]] = []
 
     client = HikAccessClient(
-        host=f"127.0.0.1",
+        host="127.0.0.1",
         port=server.port,
         username="u",
         password="p",
@@ -56,3 +56,29 @@ async def test_client_streams_one_event(aiohttp_server) -> None:
     await asyncio.wait_for(collect(), timeout=2)
     assert received[0]["card_no"] == ""
     assert received[0]["serial_no"] == 1
+
+
+async def _unauthorized_handler(request: web.Request) -> web.Response:
+    return web.Response(status=401, text="Unauthorized")
+
+
+@pytest.mark.asyncio
+async def test_alertstream_401_raises_hik_access_auth_error(aiohttp_server) -> None:
+    app = web.Application()
+    app.router.add_get("/ISAPI/Event/notification/alertStream", _unauthorized_handler)
+    server = await aiohttp_server(app)
+
+    client = HikAccessClient(
+        host="127.0.0.1",
+        port=server.port,
+        username="u",
+        password="p",
+        ssl=False,
+        verify_ssl=False,
+    )
+    try:
+        with pytest.raises(HikAccessAuthError):
+            async for _ in client.events():
+                pass
+    finally:
+        await client.stop()
