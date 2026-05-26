@@ -39,14 +39,19 @@ DOOR_HELD_OPEN_CODES: frozenset[int] = frozenset({81})
 def normalize_event(raw: dict[str, Any]) -> dict[str, Any] | None:
     """Convert a raw alertStream chunk to a normalized payload.
 
-    Returns None for chunks that aren't AccessControllerEvents.
+    Returns ``None`` for chunks that aren't AccessControllerEvents, or whose
+    ``majorEventType`` / ``subEventType`` aren't coercible to int — one bad
+    chunk must not tear down the stream consumer.
     """
     if raw.get("eventType") != "AccessControllerEvent":
         return None
 
     ace = raw.get("AccessControllerEvent", {})
-    major = int(ace.get("majorEventType", 0))
-    minor = int(ace.get("subEventType", 0))
+    try:
+        major = int(ace.get("majorEventType", 0))
+        minor = int(ace.get("subEventType", 0))
+    except (TypeError, ValueError):
+        return None
 
     return {
         "device_id": None,  # filled in by client (needs deviceInfo serial)
