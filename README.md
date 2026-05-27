@@ -34,7 +34,12 @@ For a controller with one enabled reader called "Eingang" and one wired door:
 | Entity ID | Type | Description |
 |---|---|---|
 | `sensor.hikvision_eingang_last_event` | sensor | Name of the last person to swipe. Attributes carry the full event payload. |
-| `sensor.hikvision_eingang_total_swipes` | sensor (`total_increasing`) | Lifetime swipe count. `last_serial_no` attribute persists the latest event serial for backfill. |
+| `sensor.hikvision_eingang_total_swipes` | sensor (`total_increasing`) | Lifetime swipe count (card reads). `last_serial_no` / `last_event_time` attributes persist the high-water mark for backfill. |
+| `sensor.hikvision_eingang_card_valid` | sensor (`total_increasing`) | Lifetime count of valid card swipes (minor `1`). |
+| `sensor.hikvision_eingang_card_denied` | sensor (`total_increasing`) | Lifetime count of denied card reads (minor `6–12`: invalid period/password/expired/unregistered/blocked/invalid-door/auth-failed). |
+| `sensor.hikvision_eingang_fingerprint_valid` | sensor (`total_increasing`) | Lifetime count of valid fingerprints (minor `22`). |
+| `sensor.hikvision_eingang_fingerprint_invalid` | sensor (`total_increasing`) | Lifetime count of invalid fingerprints (minor `21`). |
+| `sensor.hikvision_eingang_door_events` | sensor (`total_increasing`) | Lifetime count of door events (minor `75/76/81/82`: opened/closed/held/forced). |
 | `sensor.hikvision_eingang_unique_visitors_today` | sensor | Distinct cardholders seen since local midnight. Attributes: `cardholders` (names), `card_hashes` (opaque digests), `last_reset`. |
 | `binary_sensor.hikvision_door_1_open` | binary_sensor (`door`) | Magnetic-contact state. |
 | `binary_sensor.hikvision_door_1_lock` | binary_sensor (`lock`) | `on` = unlocked (HA convention). |

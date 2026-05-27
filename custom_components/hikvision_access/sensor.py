@@ -29,12 +29,25 @@ def _slug(name: str, slot: int) -> str:
     return slug or f"reader{slot}"
 
 
+# Per-reader lifetime counters grouped by event category. Each entry is
+# (entity-id key, friendly label, the minorEvent codes that fall in the group).
+# Only decoded/known codes are grouped — the device's ``unknown_<n>`` noise is
+# intentionally left uncounted. Codes come from ``api.events.MINOR_EVENT_LABELS``.
+EVENT_CATEGORIES: tuple[tuple[str, str, frozenset[int]], ...] = (
+    ("card_valid", "Valid Card Swipes", frozenset({1})),
+    ("card_denied", "Denied Card Reads", frozenset({6, 7, 8, 9, 10, 11, 12})),
+    ("fingerprint_valid", "Valid Fingerprints", frozenset({22})),
+    ("fingerprint_invalid", "Invalid Fingerprints", frozenset({21})),
+    ("door_events", "Door Events", frozenset({75, 76, 81, 82})),
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: HikAccessConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Create one LastEventSensor and one TotalSwipesSensor per enabled reader."""
+    """Create the per-reader sensors (last-event, swipe + category counters)."""
     data = entry.runtime_data
     entities: list[SensorEntity] = []
     for r in data.readers:
@@ -42,6 +55,13 @@ async def async_setup_entry(
             entities.append(LastEventSensor(entry, reader_slot=r.slot, reader_name=r.name))
             entities.append(TotalSwipesSensor(entry, reader_slot=r.slot, reader_name=r.name))
             entities.append(UniqueVisitorsTodaySensor(entry, reader_slot=r.slot, reader_name=r.name))
+            for key, label, codes in EVENT_CATEGORIES:
+                entities.append(
+                    EventCategoryCountSensor(
+                        entry, reader_slot=r.slot, reader_name=r.name,
+                        key=key, label=label, minor_codes=codes,
+                    )
+                )
     async_add_entities(entities)
 
 
@@ -182,6 +202,66 @@ class TotalSwipesSensor(RestoreEntity, SensorEntity):
         if payload.get("card_no"):
             self._count += 1
         self.async_write_ha_state()
+
+
+class EventCategoryCountSensor(RestoreEntity, SensorEntity):
+    """Lifetime cumulative count of one event category on this reader.
+
+    Counting mirrors TotalSwipes: ``total_increasing`` + RestoreEntity, fed by
+    the SIGNAL_EVENT dispatcher. Dedup across restarts is owned by the backfill
+    high-water mark (it only dispatches genuinely-new events), so these counters
+    don't track serials themselves — they just tally what they're handed.
+    """
+
+    _attr_has_entity_name = False
+    _attr_should_poll = False
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_native_unit_of_measurement = "events"
+
+    def __init__(
+        self,
+        entry: HikAccessConfigEntry,
+        reader_slot: int,
+        reader_name: str,
+        key: str,
+        label: str,
+        minor_codes: frozenset[int],
+    ) -> None:
+        self._entry = entry
+        self._reader_slot = reader_slot
+        self._minor_codes = minor_codes
+        slug = _slug(reader_name, reader_slot)
+        self._attr_unique_id = f"{entry.unique_id}_reader_{reader_slot}_{key}"
+        self._attr_name = f"Hikvision {reader_name or f'Reader {reader_slot}'} {label}"
+        self.entity_id = f"sensor.hikvision_{slug}_{key}"
+        self._count = 0
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.unique_id or entry.entry_id)},
+        )
+
+    @property
+    def native_value(self) -> int:
+        return self._count
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is not None and last.state not in ("unknown", "unavailable", None):
+            try:
+                self._count = int(float(last.state))
+            except (TypeError, ValueError):
+                self._count = 0
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, SIGNAL_EVENT, self._on_event)
+        )
+
+    @callback
+    def _on_event(self, payload: dict[str, Any]) -> None:
+        if payload.get("reader_no") != self._reader_slot:
+            return
+        if payload.get("minor") in self._minor_codes:
+            self._count += 1
+            self.async_write_ha_state()
 
 
 class UniqueVisitorsTodaySensor(RestoreEntity, SensorEntity):

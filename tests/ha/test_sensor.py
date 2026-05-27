@@ -327,3 +327,66 @@ async def test_total_swipes_persists_last_serial_no(hass: HomeAssistant) -> None
 
     state = hass.states.get("sensor.hikvision_eingang_total_swipes")
     assert state.attributes.get("last_serial_no") == 9
+
+
+@pytest.mark.asyncio
+async def test_event_category_counters(hass: HomeAssistant) -> None:
+    """Each category counter tallies only its own minor codes on its reader;
+    unknown codes and other readers are ignored."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_HOST: "h", CONF_PORT: 443, CONF_SSL: True, CONF_VERIFY_SSL: False,
+            CONF_USERNAME: "admin", CONF_PASSWORD: "pw",
+        },
+        unique_id="serial-cats",
+    )
+    entry.add_to_hass(hass)
+
+    with patch("custom_components.hikvision_access.HikAccessClient") as cls:
+        client = AsyncMock()
+        client.get_device_info = AsyncMock(
+            return_value={"serial_number": "serial-cats", "model": "M"}
+        )
+        client.probe_readers = AsyncMock(return_value=[
+            ReaderInfo(slot=1, enabled=True, name="Eingang", description=""),
+        ])
+        client.get_acs_work_status = AsyncMock(return_value={"AcsWorkStatus": {}})
+
+        async def empty():
+            if False:
+                yield  # pragma: no cover
+        client.events = MagicMock(return_value=empty())
+        client.stop = AsyncMock()
+        cls.return_value = client
+
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    # (reader_no, minor): two valid cards, two denials (codes 6 & 9), one valid
+    # and one invalid fingerprint, one door event, one uncounted unknown, and
+    # one valid card on a different reader that must not be tallied.
+    events = [
+        (1, 1), (1, 1), (1, 6), (1, 9), (1, 22), (1, 21), (1, 82), (1, 1024), (2, 1),
+    ]
+    for reader_no, minor in events:
+        async_dispatcher_send(
+            hass, SIGNAL_EVENT,
+            {
+                "controller": "C", "reader_no": reader_no, "reader_name": "Eingang",
+                "door_no": 1, "card_no": "", "name": "x",
+                "minor_label": "x", "minor": minor, "serial_no": 1,
+                "timestamp": "t", "backfilled": False, "major": "event",
+                "employee_no": "",
+            },
+        )
+        await hass.async_block_till_done()
+
+    def _val(suffix: str) -> int:
+        return int(hass.states.get(f"sensor.hikvision_eingang_{suffix}").state)
+
+    assert _val("card_valid") == 2
+    assert _val("card_denied") == 2
+    assert _val("fingerprint_valid") == 1
+    assert _val("fingerprint_invalid") == 1
+    assert _val("door_events") == 1
