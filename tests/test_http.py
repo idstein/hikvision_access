@@ -101,13 +101,13 @@ async def test_get_device_info_digest_auth(aiohttp_server) -> None:
 
 
 @pytest.mark.asyncio
-async def test_digest_challenge_cached_across_requests(aiohttp_server) -> None:
-    """After the first 401, subsequent requests reuse the cached challenge.
+async def test_digest_renegotiates_when_no_nextnonce(aiohttp_server) -> None:
+    """Without Authentication-Info: nextnonce, each request re-handshakes.
 
-    Caching is required to avoid tripping Hikvision's IP-filter brute-force
-    counter, which logs every unauthenticated 401 as a failed-login attempt.
-    For N probe calls we expect N+1 requests on the wire: the first one
-    unauthenticated (harvesting the challenge), then N authenticated.
+    Tested Hikvision firmware issues single-use nonces and rejects a reused
+    one with a 401 that has no fresh challenge, so the client invalidates the
+    cache after every success. For N probe calls that means 2N requests on
+    the wire — an unauthenticated 401 followed by an authenticated 200 each.
     """
     request_log: list[str | None] = []
 
@@ -135,15 +135,55 @@ async def test_digest_challenge_cached_across_requests(aiohttp_server) -> None:
         host="127.0.0.1", port=server.port, username="admin",
         password="secret", ssl=False, verify_ssl=False,
     )
+    client._min_request_interval = 0  # don't slow the test with the throttle
     await client.probe_readers(max_slots=3)
-    # First request: no Authorization → 401 + retry with auth (2 entries).
-    # Subsequent requests: Authorization on first try (1 entry each).
+    assert len(request_log) == 6  # 3 probe calls, each unauth-then-auth
+    assert request_log[0::2] == [None, None, None]
+    for auth_header in request_log[1::2]:
+        assert auth_header is not None
+        assert auth_header.startswith("Digest")
+    await client.stop()
+
+
+@pytest.mark.asyncio
+async def test_digest_reuses_nextnonce_when_offered(aiohttp_server) -> None:
+    """If the server hands back Authentication-Info: nextnonce, the client
+    reuses it on the next request — no second unauthenticated probe."""
+    request_log: list[str | None] = []
+    nonces = iter(["n1", "n2", "n3", "n4", "n5"])
+
+    async def handler(request: web.Request) -> web.Response:
+        request_log.append(request.headers.get("Authorization"))
+        auth = request.headers.get("Authorization", "")
+        if not auth.lower().startswith("digest"):
+            return web.Response(
+                status=401,
+                headers={
+                    "WWW-Authenticate": (
+                        f'Digest realm="Hik", qop="auth", nonce="{next(nonces)}", algorithm=MD5'
+                    )
+                },
+            )
+        slot = request.match_info["slot"]
+        resp = web.json_response(
+            {"CardReaderCfg": {"enable": True, "cardReaderName": f"R{slot}"}}
+        )
+        # Offer a fresh nonce for the next request (RFC 7616 §3.5).
+        resp.headers["Authentication-Info"] = f'nextnonce="{next(nonces)}"'
+        return resp
+
+    app = web.Application()
+    app.router.add_get("/ISAPI/AccessControl/CardReaderCfg/{slot}", handler)
+    server = await aiohttp_server(app)
+    client = HikAccessClient(
+        host="127.0.0.1", port=server.port, username="admin",
+        password="secret", ssl=False, verify_ssl=False,
+    )
+    client._min_request_interval = 0
+    await client.probe_readers(max_slots=3)
+    # First call: unauth(401)+auth(200) = 2 wire requests. Then each subsequent
+    # call reuses the offered nextnonce → 1 authenticated request each.
     assert request_log[0] is None
-    assert request_log[1] is not None
-    assert request_log[1].startswith("Digest")
-    assert request_log[2] is not None
-    assert request_log[2].startswith("Digest")
-    assert request_log[3] is not None
-    assert request_log[3].startswith("Digest")
-    assert len(request_log) == 4  # 1 unauth + 3 auth (first call doubles, rest single)
+    assert all(h is not None for h in request_log[1:])
+    assert len(request_log) == 4  # 1 unauth + 3 auth
     await client.stop()

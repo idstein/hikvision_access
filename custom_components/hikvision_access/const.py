@@ -22,8 +22,15 @@ ACS_WORK_STATUS_PATH = "/ISAPI/AccessControl/AcsWorkStatus?format=json"
 ACS_EVENT_SEARCH_PATH = "/ISAPI/AccessControl/AcsEvent?format=json"
 CARD_READER_CFG_PATH = "/ISAPI/AccessControl/CardReaderCfg/{slot}?format=json"
 
-POLL_INTERVAL_SECONDS = 10
+# 30s rather than 10s: each poll re-negotiates digest (single-use nonces on
+# the tested firmware), so a tighter interval raises the request rate and
+# risks tripping the device's IP-filter "illegal login" lockout.
+POLL_INTERVAL_SECONDS = 30
 STREAM_STALLED_AFTER = 90
 BACKOFF_INITIAL = 1
 BACKOFF_MAX = 60
 AUTH_FAIL_LIMIT = 2
+# Minimum spacing between outbound ISAPI requests. Hikvision IP-filter
+# lockouts are rate-sensitive; spacing the setup burst (deviceInfo + reader
+# probes + first poll) avoids tripping it.
+MIN_REQUEST_INTERVAL = 0.5

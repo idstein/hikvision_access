@@ -20,6 +20,9 @@ _LOGGER = logging.getLogger(__name__)
 
 _BACKOFF_MAX = 60
 _AUTH_FAIL_LIMIT = 2
+# Minimum spacing between outbound ISAPI requests (seconds). Kept in the
+# pure-Python layer so the client is self-contained; the HA const mirrors it.
+MIN_REQUEST_INTERVAL = 0.5
 
 
 class HikAccessError(Exception):
@@ -95,6 +98,21 @@ class HikAccessClient:
         # True while events() is iterating; lets stop() know whether to close
         # the session itself or defer to events()'s finally clause.
         self._streaming = False
+        # Throttle: serialize requests and keep them MIN_REQUEST_INTERVAL
+        # apart so the setup burst doesn't trip the device's IP-filter.
+        self._request_lock = asyncio.Lock()
+        self._last_request_at = 0.0
+        self._min_request_interval = MIN_REQUEST_INTERVAL
+
+    async def _throttle(self) -> None:
+        """Block until at least ``_min_request_interval`` has elapsed since the
+        previous outbound request, then record the new timestamp."""
+        async with self._request_lock:
+            now = asyncio.get_running_loop().time()
+            wait = self._min_request_interval - (now - self._last_request_at)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_request_at = asyncio.get_running_loop().time()
 
     async def stop(self) -> None:
         """Signal the event loop to terminate and release the aiohttp session.
@@ -124,6 +142,7 @@ class HikAccessClient:
         """
         if self._digest is None or self._digest.has_challenge:
             return
+        await self._throttle()
         url = f"{self._base_url}/ISAPI/System/deviceInfo"
         async with self._session.get(url) as resp:
             if resp.status == 401:
@@ -255,6 +274,7 @@ class _DigestRequestCM:
         self._resp: aiohttp.ClientResponse | None = None
 
     async def __aenter__(self) -> aiohttp.ClientResponse:
+        await self._client._throttle()
         session = self._client._session
         digest = self._client._digest
         method = self._method
@@ -337,22 +357,25 @@ class _DigestRequestCM:
         return resp2
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
-        # Keep the digest challenge cached so subsequent requests can send
-        # Authorization on the first try (nc increments to satisfy replay
-        # protection). Refreshing per request would double the request rate
-        # and trip Hikvision's IP-filter "illegal login" counter — every
-        # unauthenticated probe is logged by the device as a failed attempt.
+        # Nonce-reuse policy. Tested Hikvision firmware (DS-K2702WX V1.7.4)
+        # issues STRICTLY single-use nonces: replaying a nonce — even with an
+        # incremented nc, which RFC 7616 permits — is rejected with a 401 that
+        # carries NO fresh WWW-Authenticate header, so we can't recover
+        # in-place. The only reliable path is a fresh challenge per request.
         #
-        # If the device sends a fresh nonce via the RFC 7616 §3.5
-        # Authentication-Info header on a successful response, fold it into
-        # the cache so the very next request uses the new nonce.
+        # Exception: if the device implements RFC 7616 §3.5 and hands us a
+        # `nextnonce` on the successful response, reuse THAT (one round-trip,
+        # no extra unauthenticated probe). Devices that omit it fall back to
+        # invalidate-and-rechallenge.
         if (
             self._resp is not None
-            and self._resp.status not in (401,)
+            and self._resp.status != 401
             and self._client._digest is not None
         ):
             auth_info = self._resp.headers.get("Authentication-Info")
-            if auth_info:
+            if auth_info and "nextnonce" in auth_info.lower():
                 self._client._digest.handle_auth_info(auth_info)
+            else:
+                self._client._digest.invalidate()
         if self._resp is not None and not self._resp.closed:
             self._resp.release()
