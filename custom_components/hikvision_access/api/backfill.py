@@ -7,6 +7,8 @@ import uuid
 from collections.abc import AsyncIterator, Iterable, Iterator
 from typing import TYPE_CHECKING, Any
 
+import aiohttp
+
 from .events import MAJOR_LABELS, MINOR_EVENT_LABELS
 
 if TYPE_CHECKING:
@@ -111,13 +113,16 @@ async def fetch_pages(
             json=body,
         ) as r:
             if r.status >= 400:
-                # Pull a snippet of the error body so the warning log carries
-                # enough context to diagnose firmware-specific schema gripes
-                # without a full traffic capture.
-                body_preview = await r.text()
+                # Pull a snippet of the error body for the log. Hikvision often
+                # slams the connection shut on a 4xx, so reading the body can
+                # itself raise — don't let that mask the status code.
+                try:
+                    body_preview = (await r.text())[:500]
+                except (aiohttp.ClientError, TimeoutError):
+                    body_preview = "<connection closed before body could be read>"
                 _LOGGER.warning(
                     "AcsEvent search returned %d; body=%s; request=%r",
-                    r.status, body_preview[:500], body,
+                    r.status, body_preview, body,
                 )
                 r.raise_for_status()  # surface so the caller can choose to abort
             page = await r.json(content_type=None)
