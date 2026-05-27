@@ -93,7 +93,13 @@ class HikAccessClient:
         self._session = aiohttp.ClientSession(connector=connector)
         self._transport: AlertStreamTransport | None = None
         self._stop = asyncio.Event()
-        self._initial_backoff = 1.0
+        # Reconnect floor. This firmware allows only ONE alertStream session
+        # and closes it on its own ~5.5-min timer; after a drop it needs
+        # ~20-30s to release the session server-side. Reconnecting sooner just
+        # races the reaper and gets 400 "Bad Request", and the rapid retries
+        # pile up half-open sessions that eventually exhaust the controller.
+        # So wait this long before the first reconnect rather than storming.
+        self._initial_backoff = 25.0
         self._auth_fail_count = 0
         # True while events() is iterating; lets stop() know whether to close
         # the session itself or defer to events()'s finally clause.
@@ -150,7 +156,12 @@ class HikAccessClient:
                     if self._auth_fail_count >= _AUTH_FAIL_LIMIT:
                         raise
                 except (aiohttp.ClientError, TimeoutError) as err:
-                    _LOGGER.debug("transport error, will retry: %s", err)
+                    _LOGGER.debug(
+                        "alertStream dropped; reconnecting in %.0fs "
+                        "(waiting for the controller to release its single "
+                        "stream session): %s",
+                        backoff, err,
+                    )
 
                 if self._stop.is_set():
                     return

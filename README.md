@@ -12,7 +12,7 @@ Pre-release. Tested against `DS-K2702WX-E1(P)` firmware V1.7.4.
 
 - **Real-time chip/card events** via ISAPI's `/Event/notification/alertStream` (no polling).
 - **Auto-discovery of enabled readers** by probing `CardReaderCfg/{slot}`.
-- **Door state** (open / locked / tamper) polled from `AcsWorkStatus` every 10 s.
+- **Door state** (open / locked / tamper) polled from `AcsWorkStatus` every 60 s. (The controller has a small concurrent-session budget shared with the event stream, so polling is deliberately conservative.)
 - **Lifetime swipe counter** per reader (`total_increasing` — HA's long-term statistics keep hourly buckets forever).
 - **Unique visitors today** per reader. Card numbers are SHA-256-hashed before persisting to avoid leaking PII through HA's state-store / recorder DB / REST API. Display names remain visible.
 - **Startup backfill** of events the controller buffered while HA was down. Replayed events are also injected into HA's long-term statistics at their correct hour buckets — no smearing across the downtime window.

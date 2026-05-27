@@ -76,6 +76,7 @@ async def test_alertstream_401_raises_hik_access_auth_error(aiohttp_server) -> N
         ssl=False,
         verify_ssl=False,
     )
+    client._initial_backoff = 0.01  # don't wait the real reconnect floor
     try:
         with pytest.raises(HikAccessAuthError):
             async for _ in client.events():
