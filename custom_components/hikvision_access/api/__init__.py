@@ -137,10 +137,8 @@ class HikAccessClient:
             backoff = self._initial_backoff
             while not self._stop.is_set():
                 self._transport = AlertStreamTransport(
-                    session=self._session,
+                    client=self,
                     url=f"{self._base_url}/ISAPI/Event/notification/alertStream",
-                    digest=self._digest,
-                    challenge_url=f"{self._base_url}/ISAPI/System/deviceInfo",
                 )
                 try:
                     async for evt in self._transport.stream():

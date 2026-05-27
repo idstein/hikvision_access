@@ -208,33 +208,29 @@ async def test_stop_closes_session_when_events_never_started() -> None:
 
 @pytest.mark.asyncio
 async def test_alertstream_does_its_own_digest_handshake(aiohttp_server) -> None:
-    """The transport harvests the Digest challenge from the cheap deviceInfo
-    endpoint (NOT by probing the streaming endpoint twice — that 400s on some
-    firmware), then opens alertStream once with Authorization set."""
+    """The transport does the standard Digest handshake on the alertStream URL
+    itself: an unauthenticated probe gets a 401 + challenge, then the same URL
+    is retried with Authorization set. This mirrors ``curl --digest`` and the
+    working AcsWorkStatus poll. (Earlier versions harvested the challenge from
+    a different endpoint, whose cross-endpoint nonce made the firmware 400.)"""
     import hashlib
     import re
 
     def _md5(s: str) -> str:
         return hashlib.md5(s.encode()).hexdigest()
 
-    async def challenge_handler(request: web.Request) -> web.Response:
-        # deviceInfo is the challenge source: always 401 unauthenticated.
-        return web.Response(
-            status=401,
-            headers={
-                "WWW-Authenticate": (
-                    'Digest realm="Hik", qop="auth", nonce="xyz789", algorithm=MD5'
-                )
-            },
-        )
-
     async def stream_handler(request: web.Request) -> web.StreamResponse:
         auth = request.headers.get("Authorization", "")
         if not auth.lower().startswith("digest"):
-            # The transport must arrive already authenticated — it harvested
-            # the challenge from deviceInfo. An unauthenticated hit here is a
-            # bug (the old double-probe behaviour we're guarding against).
-            return web.Response(status=400, text="alertStream hit without auth")
+            # Unauthenticated probe: hand back a Digest challenge.
+            return web.Response(
+                status=401,
+                headers={
+                    "WWW-Authenticate": (
+                        'Digest realm="Hik", qop="auth", nonce="xyz789", algorithm=MD5'
+                    )
+                },
+            )
         fields = dict(re.findall(r'(\w+)=("[^"]*"|[^,\s]+)', auth[len("Digest "):]))
         for k, v in list(fields.items()):
             fields[k] = v.strip('"')
@@ -261,7 +257,6 @@ async def test_alertstream_does_its_own_digest_handshake(aiohttp_server) -> None
         return resp
 
     app = web.Application()
-    app.router.add_get("/ISAPI/System/deviceInfo", challenge_handler)
     app.router.add_get("/ISAPI/Event/notification/alertStream", stream_handler)
     server = await aiohttp_server(app)
 
