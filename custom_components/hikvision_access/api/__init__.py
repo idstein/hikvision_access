@@ -140,6 +140,7 @@ class HikAccessClient:
                     session=self._session,
                     url=f"{self._base_url}/ISAPI/Event/notification/alertStream",
                     digest=self._digest,
+                    challenge_url=f"{self._base_url}/ISAPI/System/deviceInfo",
                 )
                 try:
                     async for evt in self._transport.stream():

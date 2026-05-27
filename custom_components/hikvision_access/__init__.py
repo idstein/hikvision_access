@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from homeassistant.components.recorder.statistics import (
     StatisticData,
     StatisticMetaData,
-    async_import_statistics,
+    async_add_external_statistics,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -152,8 +152,19 @@ async def _run_backfill(hass: HomeAssistant, entry: HikAccessConfigEntry) -> Non
             exc_info=True,
         )
 
-    # Inject exact hour buckets into long-term statistics so the chart stays
-    # accurate even when ingest time differs from the original event time.
+    # Push the per-hour history into EXTERNAL statistics — a namespace
+    # separate from the live `sensor.*_total_swipes` entity.
+    #
+    # We must NOT import into the entity's own statistic_id: that sensor is a
+    # recorder-owned `total_increasing` entity, so the recorder already
+    # compiles hourly rows there. A second writer collides on
+    # (metadata_id, start_ts) → "UNIQUE constraint failed" on every restart.
+    #
+    # External statistics (`<domain>:<name>` id, source=<domain>) live in
+    # their own namespace and are idempotent: re-importing the same hour just
+    # overwrites, so replaying the device's AcsEvent log on every restart is
+    # harmless. The user charts the `hikvision_access:..._swipes_history`
+    # statistic for the historical hourly/daily view.
     if not replayed_per_slot:
         return
     for slot, timestamps in replayed_per_slot.items():
@@ -163,7 +174,7 @@ async def _run_backfill(hass: HomeAssistant, entry: HikAccessConfigEntry) -> Non
         from .sensor import _slug
 
         slug = _slug(r.name, slot)
-        statistic_id = f"sensor.hikvision_{slug}_total_swipes"
+        statistic_id = f"{DOMAIN}:{slug}_swipes_history"
         buckets: dict[datetime, int] = defaultdict(int)
         for ts in timestamps:
             bucket = ts.replace(minute=0, second=0, microsecond=0)
@@ -172,16 +183,20 @@ async def _run_backfill(hass: HomeAssistant, entry: HikAccessConfigEntry) -> Non
         stats: list[StatisticData] = []
         for bucket in sorted(buckets):
             running += buckets[bucket]
-            stats.append({"start": bucket, "sum": running})
+            # `state` = swipes in this hour, `sum` = cumulative — both let HA's
+            # statistics-graph render the per-bucket "change" view.
+            stats.append(
+                {"start": bucket, "state": float(buckets[bucket]), "sum": float(running)}
+            )
         metadata = StatisticMetaData(
-            source="recorder",
+            source=DOMAIN,
             statistic_id=statistic_id,
+            name=f"{r.name or f'Reader {slot}'} swipes (history)",
             unit_of_measurement="swipes",
             has_mean=False,
             has_sum=True,
-            name=None,
         )
-        async_import_statistics(hass, metadata, stats)
+        async_add_external_statistics(hass, metadata, stats)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: HikAccessConfigEntry) -> bool:

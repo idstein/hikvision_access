@@ -41,10 +41,16 @@ class AlertStreamTransport:
         session: aiohttp.ClientSession,
         url: str,
         digest: DigestAuth | None,
+        challenge_url: str | None = None,
     ) -> None:
         self._session = session
         self._url = url
         self._digest = digest
+        # Endpoint used to harvest the Digest challenge. We deliberately DON'T
+        # probe the alertStream URL itself: opening that long-lived multipart
+        # endpoint twice in quick succession makes some firmware reply 400.
+        # A cheap, non-streaming GET (deviceInfo) yields the same realm/nonce.
+        self._challenge_url = challenge_url
         self._stop = asyncio.Event()
 
     async def stop(self) -> None:
@@ -55,25 +61,26 @@ class AlertStreamTransport:
         from . import HikAccessAuthError
 
         headers: dict[str, str] = {}
-        if self._digest is not None:
-            # Explicit handshake: probe unauthenticated to harvest a fresh
-            # challenge, then open the real stream with the Authorization
-            # header already set so the device never 401s mid-body.
-            async with self._session.get(self._url) as probe:
+        if self._digest is not None and self._challenge_url is not None:
+            # Harvest a fresh challenge from the cheap endpoint, then build the
+            # Authorization header for the alertStream URI (digest nonces are
+            # realm-scoped, so a challenge from deviceInfo authenticates the
+            # alertStream request in the same realm). Open the stream exactly
+            # once, authenticated, so the device never 401s/400s mid-body.
+            async with self._session.get(self._challenge_url) as probe:
                 if probe.status == 401:
                     www_auth = probe.headers.get("WWW-Authenticate")
                     if not www_auth:
-                        raise HikAccessAuthError("alertStream returned 401")
+                        raise HikAccessAuthError("challenge probe returned 401 with no header")
                     headers["Authorization"] = self._digest.authorization(
                         www_auth, "GET", _request_uri(self._url)
                     )
-                # If the probe returned 200 (anonymous access), no auth needed;
-                # we re-open below to stream the body cleanly.
+                # 200 → anonymous access; open the stream without auth.
 
         parser = MultipartParser(boundary=b"MIME_boundary")
         async with self._session.get(self._url, headers=headers) as resp:
             if resp.status == 401:
-                raise HikAccessAuthError("alertStream returned 401 after retry")
+                raise HikAccessAuthError("alertStream returned 401")
             resp.raise_for_status()
             async for raw in resp.content.iter_any():
                 if self._stop.is_set():

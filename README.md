@@ -84,6 +84,18 @@ utility_meter:
 
 The native hourly-bucket histogram is already available in the "Statistics" graph card without any extra config.
 
+### Historical chart (events from before HA was running)
+
+The startup backfill replays the device's own AcsEvent log and writes it to a
+**separate external statistic** per reader, `hikvision_access:<reader>_swipes_history`
+(e.g. `hikvision_access:eingang_swipes_history`). This is kept distinct from the
+live `sensor.<reader>_total_swipes` entity because Home Assistant's recorder owns
+the entity's own statistics namespace — writing history into it would collide.
+
+To chart the full history: Statistics Graph card → add statistic
+`hikvision_access:eingang_swipes_history` → period Hour / Day. Re-importing on each
+restart is idempotent (same hour buckets are overwritten, not duplicated).
+
 ## Reolink doorbell snapshot on swipe
 
 The integration ships device triggers, so the automation editor lists this directly. Equivalent YAML:

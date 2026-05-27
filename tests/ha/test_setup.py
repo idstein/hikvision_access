@@ -180,7 +180,7 @@ async def test_backfill_runs_on_startup(hass: HomeAssistant) -> None:
     with patch(
         "custom_components.hikvision_access.HikAccessClient"
     ) as cls, patch(
-        "custom_components.hikvision_access.async_import_statistics"
+        "custom_components.hikvision_access.async_add_external_statistics"
     ):
         client = AsyncMock()
         client.get_device_info = AsyncMock(
@@ -238,7 +238,7 @@ async def test_backfill_imports_hourly_statistics(hass: HomeAssistant) -> None:
             }
 
     with patch(
-        "custom_components.hikvision_access.async_import_statistics"
+        "custom_components.hikvision_access.async_add_external_statistics"
     ) as import_stats, patch(
         "custom_components.hikvision_access.HikAccessClient"
     ) as cls:
@@ -264,12 +264,16 @@ async def test_backfill_imports_hourly_statistics(hass: HomeAssistant) -> None:
 
     assert import_stats.call_count == 1
     _hass_arg, metadata, stats = import_stats.call_args.args
-    assert metadata["statistic_id"] == "sensor.hikvision_eingang_total_swipes"
+    # External statistics namespace (domain-prefixed id, source=domain) so we
+    # don't collide with the recorder-owned `sensor.*_total_swipes` entity.
+    assert metadata["statistic_id"] == "hikvision_access:eingang_swipes_history"
+    assert metadata["source"] == "hikvision_access"
     assert metadata["unit_of_measurement"] == "swipes"
     assert metadata["has_sum"] is True
-    # Running sums: 2 events in 08:00 bucket, +1 in 09:00 → 2, 3.
-    sums = [row["sum"] for row in stats]
-    assert sums == [2, 3]
+    # Per-hour `state` counts: 2 events in 08:00, 1 in 09:00.
+    assert [row["state"] for row in stats] == [2.0, 1.0]
+    # Running cumulative `sum`: 2, then 3.
+    assert [row["sum"] for row in stats] == [2.0, 3.0]
 
 
 def _parse_iso_window(start_time: str, end_time: str) -> timedelta:
