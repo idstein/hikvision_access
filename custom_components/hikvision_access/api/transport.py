@@ -28,11 +28,12 @@ def _request_uri(url: str) -> str:
 class AlertStreamTransport:
     """Consume /ISAPI/Event/notification/alertStream as multipart HTTPS.
 
-    The Digest challenge must be in :class:`DigestAuth`'s cache before this
-    transport is constructed — the client's ``_ensure_digest_challenge``
-    handles that preflight. Once cached we send ``Authorization: Digest ...``
-    on the very first request, so the device doesn't 401-and-retry us
-    mid-stream.
+    A streaming response can't tolerate a 401-then-retry once the body is
+    flowing, so the transport does its own explicit Digest handshake before
+    streaming: an unauthenticated probe to harvest a fresh challenge, then
+    the real stream opened with ``Authorization: Digest ...`` on the first
+    request. The :class:`DigestAuth` helper is stateless, so there's no
+    pre-populated cache to rely on.
     """
 
     def __init__(
@@ -54,34 +55,25 @@ class AlertStreamTransport:
         from . import HikAccessAuthError
 
         headers: dict[str, str] = {}
-        if self._digest is not None and self._digest.has_challenge:
-            headers["Authorization"] = self._digest.build_header("GET", _request_uri(self._url))
+        if self._digest is not None:
+            # Explicit handshake: probe unauthenticated to harvest a fresh
+            # challenge, then open the real stream with the Authorization
+            # header already set so the device never 401s mid-body.
+            async with self._session.get(self._url) as probe:
+                if probe.status == 401:
+                    www_auth = probe.headers.get("WWW-Authenticate")
+                    if not www_auth:
+                        raise HikAccessAuthError("alertStream returned 401")
+                    headers["Authorization"] = self._digest.authorization(
+                        www_auth, "GET", _request_uri(self._url)
+                    )
+                # If the probe returned 200 (anonymous access), no auth needed;
+                # we re-open below to stream the body cleanly.
 
         parser = MultipartParser(boundary=b"MIME_boundary")
         async with self._session.get(self._url, headers=headers) as resp:
             if resp.status == 401:
-                # Try once more after refreshing the challenge cache, in
-                # case our cached nonce went stale between preflight and
-                # stream open.
-                www_auth = resp.headers.get("WWW-Authenticate")
-                if self._digest is not None and www_auth:
-                    self._digest.handle_challenge(www_auth)
-                    headers["Authorization"] = self._digest.build_header(
-                        "GET", _request_uri(self._url)
-                    )
-                    async with self._session.get(self._url, headers=headers) as resp2:
-                        if resp2.status == 401:
-                            raise HikAccessAuthError("alertStream returned 401 after retry")
-                        resp2.raise_for_status()
-                        async for raw in resp2.content.iter_any():
-                            if self._stop.is_set():
-                                return
-                            async for chunk in parser.feed(raw):
-                                norm = normalize_event(chunk)
-                                if norm is not None:
-                                    yield norm
-                        return
-                raise HikAccessAuthError("alertStream returned 401")
+                raise HikAccessAuthError("alertStream returned 401 after retry")
             resp.raise_for_status()
             async for raw in resp.content.iter_any():
                 if self._stop.is_set():

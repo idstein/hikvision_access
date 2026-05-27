@@ -101,13 +101,10 @@ async def test_get_device_info_digest_auth(aiohttp_server) -> None:
 
 
 @pytest.mark.asyncio
-async def test_digest_renegotiates_when_no_nextnonce(aiohttp_server) -> None:
-    """Without Authentication-Info: nextnonce, each request re-handshakes.
-
-    Tested Hikvision firmware issues single-use nonces and rejects a reused
-    one with a 401 that has no fresh challenge, so the client invalidates the
-    cache after every success. For N probe calls that means 2N requests on
-    the wire — an unauthenticated 401 followed by an authenticated 200 each.
+async def test_each_request_does_unauth_then_auth_pair(aiohttp_server) -> None:
+    """Every request runs its own handshake: unauthenticated 401 then an
+    authenticated 200. For N calls that's 2N requests on the wire — no
+    challenge state is ever shared or cached across requests.
     """
     request_log: list[str | None] = []
 
@@ -146,31 +143,47 @@ async def test_digest_renegotiates_when_no_nextnonce(aiohttp_server) -> None:
 
 
 @pytest.mark.asyncio
-async def test_digest_reuses_nextnonce_when_offered(aiohttp_server) -> None:
-    """If the server hands back Authentication-Info: nextnonce, the client
-    reuses it on the next request — no second unauthenticated probe."""
-    request_log: list[str | None] = []
-    nonces = iter(["n1", "n2", "n3", "n4", "n5"])
+async def test_concurrent_requests_with_single_use_nonces(aiohttp_server) -> None:
+    """Regression for the concurrency bug.
+
+    The device hands out a DIFFERENT single-use nonce per 401 and rejects any
+    Authorization that reuses a previously-seen nonce (mirroring DS-K2702WX
+    V1.7.4). With per-request stateless handshakes, two concurrent calls must
+    each get their own nonce and both succeed. A shared challenge cache would
+    race: one consumes the nonce the other cached, and the loser 401s.
+    """
+    import asyncio as _asyncio
+
+    seen_nonces: set[str] = set()
+    counter = {"n": 0}
+    lock = _asyncio.Lock()
 
     async def handler(request: web.Request) -> web.Response:
-        request_log.append(request.headers.get("Authorization"))
         auth = request.headers.get("Authorization", "")
         if not auth.lower().startswith("digest"):
+            async with lock:
+                counter["n"] += 1
+                nonce = f"nonce-{counter['n']}"
             return web.Response(
                 status=401,
                 headers={
                     "WWW-Authenticate": (
-                        f'Digest realm="Hik", qop="auth", nonce="{next(nonces)}", algorithm=MD5'
+                        f'Digest realm="Hik", qop="auth", nonce="{nonce}", algorithm=MD5'
                     )
                 },
             )
+        fields = dict(re.findall(r'(\w+)=("[^"]*"|[^,\s]+)', auth[len("Digest "):]))
+        nonce = fields["nonce"].strip('"')
+        async with lock:
+            if nonce in seen_nonces:
+                # Single-use: a replayed nonce is rejected with NO fresh
+                # challenge — exactly what the real firmware does.
+                return web.Response(status=401, text="nonce already used")
+            seen_nonces.add(nonce)
         slot = request.match_info["slot"]
-        resp = web.json_response(
+        return web.json_response(
             {"CardReaderCfg": {"enable": True, "cardReaderName": f"R{slot}"}}
         )
-        # Offer a fresh nonce for the next request (RFC 7616 §3.5).
-        resp.headers["Authentication-Info"] = f'nextnonce="{next(nonces)}"'
-        return resp
 
     app = web.Application()
     app.router.add_get("/ISAPI/AccessControl/CardReaderCfg/{slot}", handler)
@@ -180,10 +193,11 @@ async def test_digest_reuses_nextnonce_when_offered(aiohttp_server) -> None:
         password="secret", ssl=False, verify_ssl=False,
     )
     client._min_request_interval = 0
-    await client.probe_readers(max_slots=3)
-    # First call: unauth(401)+auth(200) = 2 wire requests. Then each subsequent
-    # call reuses the offered nextnonce → 1 authenticated request each.
-    assert request_log[0] is None
-    assert all(h is not None for h in request_log[1:])
-    assert len(request_log) == 4  # 1 unauth + 3 auth
+
+    results = await _asyncio.gather(
+        client.probe_readers(max_slots=1),
+        client.probe_readers(max_slots=1),
+    )
+    # Both concurrent probes succeeded, each finding its single reader.
+    assert all(len(r) == 1 for r in results)
     await client.stop()

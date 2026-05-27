@@ -207,26 +207,15 @@ async def test_stop_closes_session_when_events_never_started() -> None:
 
 
 @pytest.mark.asyncio
-async def test_alertstream_with_digest_preflight(aiohttp_server) -> None:
-    """The client must preflight /ISAPI/System/deviceInfo to harvest the
-    Digest challenge, then open the alertStream with Authorization set on
-    the first request — otherwise streaming responses 401-and-retry mid-body."""
+async def test_alertstream_does_its_own_digest_handshake(aiohttp_server) -> None:
+    """The transport probes alertStream unauthenticated to harvest the Digest
+    challenge, then re-opens it with Authorization set on the first request —
+    otherwise streaming responses 401-and-retry mid-body."""
     import hashlib
     import re
 
     def _md5(s: str) -> str:
         return hashlib.md5(s.encode()).hexdigest()
-
-    async def device_info_handler(request: web.Request) -> web.Response:
-        # Always 401 — we just want the preflight to harvest the challenge.
-        return web.Response(
-            status=401,
-            headers={
-                "WWW-Authenticate": (
-                    'Digest realm="Hik", qop="auth", nonce="xyz789", algorithm=MD5'
-                )
-            },
-        )
 
     async def stream_handler(request: web.Request) -> web.StreamResponse:
         auth = request.headers.get("Authorization", "")
@@ -265,7 +254,6 @@ async def test_alertstream_with_digest_preflight(aiohttp_server) -> None:
         return resp
 
     app = web.Application()
-    app.router.add_get("/ISAPI/System/deviceInfo", device_info_handler)
     app.router.add_get("/ISAPI/Event/notification/alertStream", stream_handler)
     server = await aiohttp_server(app)
 

@@ -59,12 +59,12 @@ class HikAccessClient:
     ``HikAccessAuthError`` (so HA can surface ``ConfigEntryAuthFailed``).
 
     Hikvision ISAPI requires HTTP Digest auth (RFC 7616), not Basic, so the
-    client owns a :class:`DigestAuth` helper. ``request_ctx`` does an
-    unauthenticated probe, then retries with the Authorization header once
-    the challenge has been cached. Streaming endpoints (alertStream) need
-    the header up-front and are served via :meth:`_ensure_digest_challenge`,
-    which sends a cheap preflight ``GET /ISAPI/System/deviceInfo`` to fill
-    the cache before opening the stream.
+    client owns a stateless :class:`DigestAuth` helper. Every request does
+    its own self-contained ``unauthenticated → 401 → parse challenge →
+    authenticated retry`` handshake with a request-local nonce. The device
+    issues single-use nonces, so caching a challenge buys nothing and a
+    shared cache only invites races between concurrent requests — hence no
+    shared challenge state anywhere.
     """
 
     def __init__(
@@ -130,46 +130,10 @@ class HikAccessClient:
         if not self._streaming and not self._session.closed:
             await self._session.close()
 
-    async def _ensure_digest_challenge(self) -> None:
-        """Populate the Digest challenge cache via a cheap preflight.
-
-        Streaming endpoints (alertStream) can't tolerate the 401-then-retry
-        dance — once the body starts flowing we can't roll back. So before
-        opening the stream we issue a one-shot GET against
-        ``/ISAPI/System/deviceInfo``; the 401 it returns carries the
-        ``WWW-Authenticate: Digest`` header we need to build subsequent
-        Authorization values.
-        """
-        if self._digest is None or self._digest.has_challenge:
-            return
-        await self._throttle()
-        url = f"{self._base_url}/ISAPI/System/deviceInfo"
-        async with self._session.get(url) as resp:
-            if resp.status == 401:
-                www_auth = resp.headers.get("WWW-Authenticate")
-                if not www_auth:
-                    raise HikAccessAuthError(
-                        "401 response had no WWW-Authenticate header"
-                    )
-                self._digest.handle_challenge(www_auth)
-            # If the server didn't 401 (e.g. anonymous access allowed) we
-            # have nothing to cache and that's fine — request_ctx will skip
-            # the auth branch entirely.
-
     async def events(self) -> AsyncIterator[dict[str, Any]]:
         """Yield normalized events; reconnect with exponential backoff."""
         self._streaming = True
         try:
-            # Make sure we have the digest challenge BEFORE opening the
-            # stream — otherwise the first connect 401s, the retry kicks
-            # in mid-stream, and we get a mess. Preflight failures are
-            # tolerated: if it's a real auth problem, the stream will 401
-            # too and the normal escalation path runs.
-            try:
-                await self._ensure_digest_challenge()
-            except (aiohttp.ClientError, TimeoutError) as err:
-                _LOGGER.debug("digest preflight failed, will let stream surface it: %s", err)
-
             backoff = self._initial_backoff
             while not self._stop.is_set():
                 self._transport = AlertStreamTransport(
@@ -208,13 +172,11 @@ class HikAccessClient:
     ) -> _DigestRequestCM:
         """Return an async context manager that yields an aiohttp response.
 
-        Performs a Digest auth handshake on demand:
-        1. If the challenge cache is empty, fire the request unauth'd. On
-           401, parse the ``WWW-Authenticate`` header and retry with the
-           Authorization header.
-        2. If the cache is populated, send the Authorization header on the
-           first try. If the server returns 401 (e.g. nonce stale), re-parse
-           the challenge and retry once.
+        Performs a self-contained Digest handshake per request: fire the
+        request unauthenticated, and on a 401 carrying a Digest
+        ``WWW-Authenticate`` challenge, retry once with an Authorization
+        header built from that fresh challenge. No challenge state is shared
+        between requests, so concurrent callers never interfere.
         """
         return _DigestRequestCM(self, method, url, kwargs)
 
@@ -222,7 +184,7 @@ class HikAccessClient:
         from .http import fetch_device_info
         return await fetch_device_info(self, self._base_url)
 
-    async def probe_readers(self, max_slots: int = 8) -> list[ReaderInfo]:
+    async def probe_readers(self, max_slots: int = 4) -> list[ReaderInfo]:
         from .http import probe_card_readers
         return await probe_card_readers(self, self._base_url, max_slots)
 
@@ -274,6 +236,8 @@ class _DigestRequestCM:
         self._resp: aiohttp.ClientResponse | None = None
 
     async def __aenter__(self) -> aiohttp.ClientResponse:
+        # The throttle paces requests AND serializes the handshake so the
+        # unauthenticated probe and its authenticated retry stay together.
         await self._client._throttle()
         session = self._client._session
         digest = self._client._digest
@@ -289,93 +253,32 @@ class _DigestRequestCM:
         # Pop headers so we can mutate them without leaking back into the caller.
         base_headers = dict(kwargs.pop("headers", {}) or {})
 
-        if digest.has_challenge:
-            headers = dict(base_headers)
-            headers["Authorization"] = digest.build_header(method, uri)
-            resp = await session.request(method, url, headers=headers, **kwargs)
-            if resp.status != 401:
-                self._resp = resp
-                return resp
-            # Cached challenge stale (nonce expired or device rotated). Reparse
-            # and try once more. NEVER fall back to an unauthenticated retry —
-            # that just guarantees another 401.
-            www_auth = resp.headers.get("WWW-Authenticate")
-            _LOGGER.debug(
-                "Digest 401 on %s after cached-challenge attempt; WWW-Authenticate=%r",
-                url, www_auth,
-            )
-            resp.release()
-            if not www_auth or "digest" not in www_auth.lower():
-                # The device 401'd without a fresh challenge — invalidate our
-                # cache so the next request_ctx triggers a fresh preflight,
-                # then surface this 401 to the caller.
-                digest.invalidate()
-                self._resp = resp
-                return resp
-            digest.handle_challenge(www_auth)
-            headers = dict(base_headers)
-            headers["Authorization"] = digest.build_header(method, uri)
-            resp2 = await session.request(method, url, headers=headers, **kwargs)
-            if resp2.status == 401:
-                _LOGGER.debug(
-                    "Digest still 401 after stale-nonce retry on %s; "
-                    "WWW-Authenticate=%r",
-                    url, resp2.headers.get("WWW-Authenticate"),
-                )
-                # Make sure the next attempt does a fresh preflight rather than
-                # reusing whatever the device just rejected.
-                digest.invalidate()
-            self._resp = resp2
-            return resp2
-
-        # No cached challenge: try unauth'd first to harvest one.
+        # Self-contained handshake: unauthenticated probe first.
         resp = await session.request(method, url, headers=base_headers, **kwargs)
         if resp.status != 401:
             self._resp = resp
             return resp
         www_auth = resp.headers.get("WWW-Authenticate")
-        _LOGGER.debug(
-            "Digest 401 on %s (cache empty); WWW-Authenticate=%r", url, www_auth,
-        )
+        _LOGGER.debug("Digest 401 on %s; WWW-Authenticate=%r", url, www_auth)
         resp.release()
         if not www_auth or "digest" not in www_auth.lower():
             # No usable challenge — let the caller surface the 401.
             self._resp = resp
             return resp
-        digest.handle_challenge(www_auth)
+        auth = digest.authorization(www_auth, method, uri)
         headers = dict(base_headers)
-        headers["Authorization"] = digest.build_header(method, uri)
+        headers["Authorization"] = auth
         resp2 = await session.request(method, url, headers=headers, **kwargs)
         if resp2.status == 401:
             _LOGGER.debug(
-                "Digest still 401 after initial challenge harvest on %s; "
+                "Digest still 401 after authenticated retry on %s; "
                 "WWW-Authenticate=%r",
                 url, resp2.headers.get("WWW-Authenticate"),
             )
-            digest.invalidate()
         self._resp = resp2
         return resp2
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
-        # Nonce-reuse policy. Tested Hikvision firmware (DS-K2702WX V1.7.4)
-        # issues STRICTLY single-use nonces: replaying a nonce — even with an
-        # incremented nc, which RFC 7616 permits — is rejected with a 401 that
-        # carries NO fresh WWW-Authenticate header, so we can't recover
-        # in-place. The only reliable path is a fresh challenge per request.
-        #
-        # Exception: if the device implements RFC 7616 §3.5 and hands us a
-        # `nextnonce` on the successful response, reuse THAT (one round-trip,
-        # no extra unauthenticated probe). Devices that omit it fall back to
-        # invalidate-and-rechallenge.
-        if (
-            self._resp is not None
-            and self._resp.status != 401
-            and self._client._digest is not None
-        ):
-            auth_info = self._resp.headers.get("Authentication-Info")
-            if auth_info and "nextnonce" in auth_info.lower():
-                self._client._digest.handle_auth_info(auth_info)
-            else:
-                self._client._digest.invalidate()
+        # No shared challenge state to invalidate — just release the response.
         if self._resp is not None and not self._resp.closed:
             self._resp.release()
