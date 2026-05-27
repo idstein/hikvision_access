@@ -89,10 +89,12 @@ async def _run_stream(hass: HomeAssistant, entry: HikAccessConfigEntry) -> None:
 async def _run_backfill(hass: HomeAssistant, entry: HikAccessConfigEntry) -> None:
     """Replay AcsEvents the controller buffered while HA was down.
 
-    Reads ``last_serial_no`` from restored TotalSwipes sensor states to skip
-    already-ingested events. Window size is controlled by the
-    ``backfill_days`` option (default 30 days). Setting it to 0 disables
-    backfill entirely. Logged at warning on failure — does NOT block setup.
+    Reads ``last_serial_no`` / ``last_event_time`` from restored TotalSwipes
+    sensor states. The fetch window is bounded by ``last_event_time`` on a warm
+    restart (so we pull only new events instead of re-paginating the whole
+    window), clamped to the ``backfill_days`` option (default 30 days; 0
+    disables backfill). The serial high-water mark dedups within that window.
+    Logged at warning on failure — does NOT block setup.
     """
     data = entry.runtime_data
     info = data.device_info
@@ -107,8 +109,12 @@ async def _run_backfill(hass: HomeAssistant, entry: HikAccessConfigEntry) -> Non
         _LOGGER.debug("backfill disabled by configuration; skipping")
         return
 
-    # Collect already-seen serials from restored sensor attributes.
+    # Restore the high-water mark from the persisted sensor attributes. The
+    # serial is a monotonically increasing per-device counter, so anything at or
+    # below ``high_water`` was already ingested (counted and fired) in a prior
+    # session. ``last_event_time`` is the timestamp of that newest event.
     seen: set[int] = set()
+    last_event_time: datetime | None = None
     for state in hass.states.async_all("sensor"):
         if not state.entity_id.startswith("sensor.hikvision_"):
             continue
@@ -117,9 +123,22 @@ async def _run_backfill(hass: HomeAssistant, entry: HikAccessConfigEntry) -> Non
         s = state.attributes.get("last_serial_no")
         if isinstance(s, int):
             seen.add(s)
+        let = state.attributes.get("last_event_time")
+        if isinstance(let, str):
+            parsed = dt_util.parse_datetime(let)
+            if parsed is not None:
+                parsed = dt_util.as_utc(parsed)
+                if last_event_time is None or parsed > last_event_time:
+                    last_event_time = parsed
+    high_water = max(seen, default=0)
 
     end = dt_util.utcnow()
-    start = end - timedelta(days=int(backfill_days))
+    deep_start = end - timedelta(days=int(backfill_days))
+    # Warm restart: start at the last event we ingested so we pull only what's
+    # new. Clamp to the deep window so a stale high-water mark can't widen the
+    # fetch (and the device's buffer doesn't reach back further anyway). Cold
+    # start (no prior events): import the full deep window once.
+    start = max(last_event_time, deep_start) if last_event_time is not None else deep_start
 
     def iso(dt: datetime) -> str:
         # Keep the explicit ``+00:00`` offset — Hikvision firmware on some
@@ -127,13 +146,18 @@ async def _run_backfill(hass: HomeAssistant, entry: HikAccessConfigEntry) -> Non
         # the time uses the ``Z`` Zulu shorthand.
         return dt.isoformat(timespec="seconds")
 
-    # slot -> list of UTC datetimes for events the device replayed
+    # slot -> list of UTC datetimes for new card events the device replayed
     replayed_per_slot: dict[int, list[datetime]] = defaultdict(list)
 
     try:
-        async for evt in data.client.backfill(
-            start_time=iso(start), end_time=iso(end), already_seen=seen
-        ):
+        async for evt in data.client.backfill(start_time=iso(start), end_time=iso(end)):
+            # Skip anything already ingested in a prior session. With a
+            # timestamp-bounded window this only trims the boundary overlap, but
+            # it's what stops a restart from re-firing old events onto the bus —
+            # inflating the counter, resurfacing old cardholders, re-triggering
+            # automations — and from double-counting them into the statistics.
+            if evt["serial_no"] <= high_water:
+                continue
             evt["device_id"] = info.get("serial_number") or entry.unique_id or entry.entry_id
             evt["controller"] = evt.get("controller") or info.get("device_name", "")
             r = reader_index.get(evt.get("reader_no"))
@@ -152,50 +176,77 @@ async def _run_backfill(hass: HomeAssistant, entry: HikAccessConfigEntry) -> Non
             exc_info=True,
         )
 
-    # Push the per-hour history into EXTERNAL statistics — a namespace
+    # Append the new per-hour counts to EXTERNAL statistics — a namespace
     # separate from the live `sensor.*_total_swipes` entity.
     #
     # We must NOT import into the entity's own statistic_id: that sensor is a
     # recorder-owned `total_increasing` entity, so the recorder already
     # compiles hourly rows there. A second writer collides on
-    # (metadata_id, start_ts) → "UNIQUE constraint failed" on every restart.
+    # (metadata_id, start_ts) → "UNIQUE constraint failed".
     #
-    # External statistics (`<domain>:<name>` id, source=<domain>) live in
-    # their own namespace and are idempotent: re-importing the same hour just
-    # overwrites, so replaying the device's AcsEvent log on every restart is
-    # harmless. The user charts the `hikvision_access:..._swipes_history`
-    # statistic for the historical hourly/daily view.
+    # The cumulative ``sum`` continues from the last stored row (read via
+    # get_last_statistics), so we only append the new hours instead of
+    # recomputing the whole history on every restart. The user charts the
+    # `hikvision_access:..._swipes_history` statistic for the hourly/daily view.
     if not replayed_per_slot:
         return
+    from homeassistant.components.recorder import get_instance
+    from homeassistant.components.recorder.statistics import get_last_statistics
+
+    from .sensor import _slug
+
     for slot, timestamps in replayed_per_slot.items():
         r = reader_index.get(slot)
         if r is None:
             continue
-        from .sensor import _slug
-
         slug = _slug(r.name, slot)
         statistic_id = f"{DOMAIN}:{slug}_swipes_history"
+        base_sum = 0.0
+        try:
+            last_stats = await get_instance(hass).async_add_executor_job(
+                get_last_statistics, hass, 1, statistic_id, True, {"sum"}
+            )
+            rows = last_stats.get(statistic_id)
+            if rows and rows[0].get("sum") is not None:
+                base_sum = float(rows[0]["sum"])
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug(
+                "could not read last statistic for %s; seeding sum at 0",
+                statistic_id,
+                exc_info=True,
+            )
         buckets: dict[datetime, int] = defaultdict(int)
         for ts in timestamps:
             bucket = ts.replace(minute=0, second=0, microsecond=0)
             buckets[bucket] += 1
-        running = 0
+        running = base_sum
         stats: list[StatisticData] = []
         for bucket in sorted(buckets):
             running += buckets[bucket]
-            # `state` = swipes in this hour, `sum` = cumulative — both let HA's
-            # statistics-graph render the per-bucket "change" view.
+            # `state` = swipes in this hour, `sum` = cumulative. HA's
+            # statistics-graph "change" view derives per-hour swipes from the
+            # sum deltas, so continuing `sum` from the stored value keeps the
+            # chart correct even across the boundary hour.
             stats.append(
-                {"start": bucket, "state": float(buckets[bucket]), "sum": float(running)}
+                {"start": bucket, "state": float(buckets[bucket]), "sum": running}
             )
-        metadata = StatisticMetaData(
-            source=DOMAIN,
-            statistic_id=statistic_id,
-            name=f"{r.name or f'Reader {slot}'} swipes (history)",
-            unit_of_measurement="swipes",
-            has_mean=False,
-            has_sum=True,
-        )
+        metadata: StatisticMetaData = {
+            "source": DOMAIN,
+            "statistic_id": statistic_id,
+            "name": f"{r.name or f'Reader {slot}'} swipes (history)",
+            "unit_of_measurement": "swipes",
+            "has_sum": True,
+        }
+        # HA 2026.x replaces the ``has_mean`` flag with ``mean_type``; older
+        # releases only know ``has_mean``. Set whichever the running version
+        # understands so we neither crash on old HA nor emit the deprecation
+        # warning on new HA. A wrong/absent import just falls back to has_mean.
+        try:
+            from homeassistant.components.recorder.models import StatisticMeanType
+
+            metadata["mean_type"] = StatisticMeanType.NONE
+        except ImportError:
+            metadata["has_mean"] = False
         async_add_external_statistics(hass, metadata, stats)
 
 

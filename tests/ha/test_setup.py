@@ -391,3 +391,84 @@ async def test_backfill_respects_options_override(hass: HomeAssistant) -> None:
         backfill_calls[0]["start_time"], backfill_calls[0]["end_time"]
     )
     assert timedelta(days=7) - timedelta(seconds=5) <= delta <= timedelta(days=7) + timedelta(seconds=5)
+
+
+@pytest.mark.asyncio
+async def test_backfill_warm_restart_bounds_window_and_skips_seen(hass: HomeAssistant) -> None:
+    """A warm restart must start the fetch at the persisted last_event_time
+    (not the full deep window) and skip events at/below the serial high-water
+    mark, so old events don't replay onto the bus."""
+    from datetime import datetime
+
+    from homeassistant.core import State
+    from homeassistant.helpers.dispatcher import async_dispatcher_connect
+    from homeassistant.util import dt as dt_util
+    from pytest_homeassistant_custom_component.common import mock_restore_cache
+
+    from custom_components.hikvision_access.api.discovery import ReaderInfo
+    from custom_components.hikvision_access.const import SIGNAL_EVENT
+
+    # Recent so it stays inside the 30-day deep window (today is mocked-now).
+    last_event_time = (dt_util.utcnow() - timedelta(hours=2)).replace(microsecond=0)
+
+    entry = _build_entry()
+    entry.add_to_hass(hass)
+    mock_restore_cache(
+        hass,
+        [
+            State(
+                "sensor.hikvision_eingang_total_swipes",
+                "100",
+                {"last_serial_no": 100, "last_event_time": last_event_time.isoformat()},
+            )
+        ],
+    )
+
+    backfill_calls: list[dict] = []
+
+    async def fake_backfill(start_time, end_time, already_seen=()):
+        backfill_calls.append({"start_time": start_time, "end_time": end_time})
+        for serial in (100, 200):  # 100 == high-water (skip), 200 is new
+            yield {
+                "device_id": None, "controller": "", "reader_no": 1, "reader_name": None,
+                "door_no": None, "card_no": f"c{serial}", "name": "x",
+                "minor_label": "card_swiped_valid", "serial_no": serial,
+                "timestamp": "2026-05-27T10:00:00+00:00", "backfilled": True,
+                "major": "event", "minor": 1, "employee_no": "",
+            }
+
+    received: list[dict] = []
+    async_dispatcher_connect(hass, SIGNAL_EVENT, lambda p: received.append(p))
+
+    with patch(
+        "custom_components.hikvision_access.HikAccessClient"
+    ) as cls, patch(
+        "custom_components.hikvision_access.async_add_external_statistics"
+    ):
+        client = AsyncMock()
+        client.get_device_info = AsyncMock(
+            return_value={"serial_number": "serial-1", "model": "M"}
+        )
+        client.probe_readers = AsyncMock(return_value=[
+            ReaderInfo(slot=1, enabled=True, name="Eingang", description=""),
+        ])
+        client.get_acs_work_status = AsyncMock(return_value={"AcsWorkStatus": {}})
+
+        async def empty_events():
+            if False:
+                yield  # pragma: no cover
+        client.events = MagicMock(return_value=empty_events())
+        client.backfill = MagicMock(side_effect=fake_backfill)
+        client.stop = AsyncMock()
+        cls.return_value = client
+
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert backfill_calls, "client.backfill was not invoked"
+    # Window starts at the persisted last_event_time, not 30 days back.
+    start = datetime.fromisoformat(backfill_calls[0]["start_time"].replace("Z", "+00:00"))
+    assert start == last_event_time
+    # Only the new event (serial > high-water) was dispatched.
+    backfilled = [e for e in received if e.get("backfilled")]
+    assert [e["serial_no"] for e in backfilled] == [200]

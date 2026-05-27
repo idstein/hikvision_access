@@ -120,11 +120,14 @@ class TotalSwipesSensor(RestoreEntity, SensorEntity):
         self._attr_name = f"Hikvision {reader_name or f'Reader {reader_slot}'} Total Swipes"
         self.entity_id = f"sensor.hikvision_{slug}_total_swipes"
         self._count = 0
-        # Highest AcsEvent serial_no observed across all readers' lifetime.
-        # Persisted as the ``last_serial_no`` state attribute so the startup
-        # backfill (Task 5.2) can skip already-ingested events in the
-        # controller's AcsEvent buffer.
+        # High-water mark of the AcsEvent log this reader has ingested.
+        # ``last_serial_no`` is the largest serial seen; ``last_event_time`` is
+        # the ISO timestamp of the latest event. Both persist as state
+        # attributes so the startup backfill can bound its fetch window to
+        # ``[last_event_time, now]`` and skip everything at or below the serial
+        # — otherwise every restart re-pulls and replays the whole window.
         self._last_serial: int | None = None
+        self._last_event_time: str | None = None
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.unique_id or entry.entry_id)},
         )
@@ -135,7 +138,10 @@ class TotalSwipesSensor(RestoreEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return {"last_serial_no": self._last_serial}
+        return {
+            "last_serial_no": self._last_serial,
+            "last_event_time": self._last_event_time,
+        }
 
     async def async_added_to_hass(self) -> None:
         """Restore counter from last state and subscribe to events."""
@@ -149,22 +155,32 @@ class TotalSwipesSensor(RestoreEntity, SensorEntity):
             ls = last.attributes.get("last_serial_no")
             if isinstance(ls, int):
                 self._last_serial = ls
+            let = last.attributes.get("last_event_time")
+            if isinstance(let, str):
+                self._last_event_time = let
         self.async_on_remove(
             async_dispatcher_connect(self.hass, SIGNAL_EVENT, self._on_event)
         )
 
     @callback
     def _on_event(self, payload: dict[str, Any]) -> None:
-        """Increment counter only for card-read events on our reader."""
+        """Advance the high-water mark and, for card reads, the swipe counter."""
         if payload.get("reader_no") != self._reader_slot:
             return
-        # Denials / system events have no card_no — don't count them.
-        if not payload.get("card_no"):
-            return
-        self._count += 1
+        # Track the high-water serial/time over ALL events on this reader (not
+        # just card reads), so the backfill can skip everything already seen.
         serial = payload.get("serial_no")
         if isinstance(serial, int):
             self._last_serial = max(self._last_serial or 0, serial)
+        ts = payload.get("timestamp")
+        if isinstance(ts, str) and ts:
+            parsed = dt_util.parse_datetime(ts)
+            current = dt_util.parse_datetime(self._last_event_time or "")
+            if parsed is not None and (current is None or parsed > current):
+                self._last_event_time = ts
+        # Denials / system events have no card_no — don't count them.
+        if payload.get("card_no"):
+            self._count += 1
         self.async_write_ha_state()
 
 

@@ -93,8 +93,11 @@ live `sensor.<reader>_total_swipes` entity because Home Assistant's recorder own
 the entity's own statistics namespace — writing history into it would collide.
 
 To chart the full history: Statistics Graph card → add statistic
-`hikvision_access:eingang_swipes_history` → period Hour / Day. Re-importing on each
-restart is idempotent (same hour buckets are overwritten, not duplicated).
+`hikvision_access:eingang_swipes_history` → period Hour / Day. On the first run the
+full window is imported; subsequent restarts fetch only events newer than the last
+one ingested (bounded by the persisted `last_event_time`) and append them, continuing
+the cumulative `sum` from the last stored hour — so a restart neither re-paginates the
+whole window nor double-counts.
 
 ## Reolink doorbell snapshot on swipe
 
@@ -160,7 +163,7 @@ action:
 
 ### Counters frozen after restart
 
-The integration replays the last 24 h of AcsEvent history on startup. If your downtime exceeded that or the device's buffer wrapped, those events are lost. The `last_serial_no` attribute on `sensor.hikvision_<reader>_total_swipes` shows the most recent event the integration has ingested.
+On startup the integration replays AcsEvents from the last one it ingested (the persisted `last_event_time`) up to now, clamped to the configured backfill window (default 30 days). If your downtime exceeded that window or the device's buffer wrapped, the older events are lost. The `last_serial_no` / `last_event_time` attributes on `sensor.hikvision_<reader>_total_swipes` show the most recent event the integration has ingested.
 
 ### Diagnostics
 
