@@ -100,11 +100,11 @@ async def _run_backfill(hass: HomeAssistant, entry: HikAccessConfigEntry) -> Non
     info = data.device_info
     reader_index = {r.slot: r for r in data.readers}
 
-    backfill_days = (
-        entry.options.get(CONF_BACKFILL_DAYS)
-        or entry.data.get(CONF_BACKFILL_DAYS)
-        or DEFAULT_BACKFILL_DAYS
-    )
+    # Explicit None checks — `or` short-circuits on 0 and would silently
+    # ignore a user who set the option to 0 to disable the replay.
+    backfill_days = entry.options.get(CONF_BACKFILL_DAYS)
+    if backfill_days is None:
+        backfill_days = entry.data.get(CONF_BACKFILL_DAYS, DEFAULT_BACKFILL_DAYS)
     if backfill_days <= 0:
         _LOGGER.debug("backfill disabled by configuration; skipping")
         return

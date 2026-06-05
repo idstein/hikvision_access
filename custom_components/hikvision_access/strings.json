@@ -11,13 +11,29 @@
           "password": "Password",
           "backfill_days": "Backfill window (days)"
         }
+      },
+      "reconfigure": {
+        "title": "Reconfigure Hikvision controller",
+        "description": "Update the host, port, TLS settings or credentials used to reach this controller. The device must report the same serial number as the original entry.",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "ssl": "Use HTTPS",
+          "verify_ssl": "Verify SSL certificate",
+          "username": "Username",
+          "password": "Password"
+        }
       }
     },
     "error": {
       "invalid_auth": "Invalid authentication",
-      "cannot_connect": "Cannot connect"
+      "cannot_connect": "Cannot connect",
+      "wrong_device": "That host responded with a different controller's serial number. Reconfigure must point at the same physical device."
     },
-    "abort": { "already_configured": "Device already configured" }
+    "abort": {
+      "already_configured": "Device already configured",
+      "reconfigure_successful": "Configuration updated"
+    }
   },
   "options": {
     "step": {

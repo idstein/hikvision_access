@@ -9,7 +9,11 @@ DEFAULT_VERIFY_SSL = False
 
 CONF_VERIFY_SSL = "verify_ssl"
 CONF_BACKFILL_DAYS = "backfill_days"
-DEFAULT_BACKFILL_DAYS = 30
+# 0 by default = live stream only. Replaying weeks of buffered AcsEvents on
+# every restart re-fires automations, inflates counters past the live state,
+# and pounds the controller's small concurrent-session budget. Users who want
+# history can opt in via the options flow.
+DEFAULT_BACKFILL_DAYS = 0
 BACKFILL_DAYS_MIN = 0     # 0 means "no backfill" (just live stream)
 BACKFILL_DAYS_MAX = 365   # device-side buffer will usually run out long before this
 

@@ -166,6 +166,119 @@ async def test_options_flow_updates_backfill_days(hass: HomeAssistant) -> None:
 
 
 @pytest.mark.asyncio
+async def test_reconfigure_flow_updates_entry(hass: HomeAssistant) -> None:
+    """Reconfigure must update the existing entry's data (no new entry)."""
+    from unittest.mock import MagicMock
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="serial-rc",
+        data={
+            CONF_HOST: "old-host",
+            CONF_PORT: 443,
+            CONF_SSL: True,
+            CONF_VERIFY_SSL: False,
+            CONF_USERNAME: "admin",
+            CONF_PASSWORD: "old-pw",
+        },
+    )
+    entry.add_to_hass(hass)
+
+    async def empty_events():
+        if False:
+            yield  # pragma: no cover
+
+    async def empty_backfill(start_time, end_time, already_seen=()):
+        if False:
+            yield  # pragma: no cover
+
+    with patch(
+        "custom_components.hikvision_access.config_flow.HikAccessClient"
+    ) as cf_cls, patch(
+        "custom_components.hikvision_access.HikAccessClient"
+    ) as setup_cls:
+        client = AsyncMock()
+        client.get_device_info = AsyncMock(
+            return_value={"serial_number": "serial-rc", "model": "M"}
+        )
+        client.probe_readers = AsyncMock(return_value=[])
+        client.get_acs_work_status = AsyncMock(return_value={"AcsWorkStatus": {}})
+        client.events = MagicMock(return_value=empty_events())
+        client.backfill = MagicMock(side_effect=empty_backfill)
+        client.stop = AsyncMock()
+        cf_cls.return_value = client
+        setup_cls.return_value = client
+
+        result = await entry.start_reconfigure_flow(hass)
+        assert result["type"] == "form"
+        assert result["step_id"] == "reconfigure"
+
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_HOST: "new-host",
+                CONF_PORT: 8443,
+                CONF_SSL: True,
+                CONF_VERIFY_SSL: False,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "new-pw",
+            },
+        )
+        await hass.async_block_till_done()
+
+        assert result2["type"] == "abort"
+        assert result2["reason"] == "reconfigure_successful"
+        assert entry.data[CONF_HOST] == "new-host"
+        assert entry.data[CONF_PORT] == 8443
+        assert entry.data[CONF_PASSWORD] == "new-pw"
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_rejects_different_device(hass: HomeAssistant) -> None:
+    """Pointing the entry at a controller with a different serial must error."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        unique_id="serial-rc",
+        data={
+            CONF_HOST: "old-host",
+            CONF_PORT: 443,
+            CONF_SSL: True,
+            CONF_VERIFY_SSL: False,
+            CONF_USERNAME: "admin",
+            CONF_PASSWORD: "old-pw",
+        },
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.hikvision_access.config_flow.HikAccessClient"
+    ) as cf_cls:
+        client = AsyncMock()
+        client.get_device_info = AsyncMock(
+            return_value={"serial_number": "DIFFERENT", "model": "M"}
+        )
+        client.stop = AsyncMock()
+        cf_cls.return_value = client
+
+        result = await entry.start_reconfigure_flow(hass)
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                CONF_HOST: "other-host",
+                CONF_PORT: 443,
+                CONF_SSL: True,
+                CONF_VERIFY_SSL: False,
+                CONF_USERNAME: "admin",
+                CONF_PASSWORD: "pw",
+            },
+        )
+    assert result2["type"] == "form"
+    assert result2["errors"] == {"base": "wrong_device"}
+    # Entry data must remain untouched on rejection.
+    assert entry.data[CONF_HOST] == "old-host"
+
+
+@pytest.mark.asyncio
 async def test_user_flow_aborts_when_already_configured(hass: HomeAssistant) -> None:
     """Adding a device with a serial already known must abort the flow."""
     existing = MockConfigEntry(
